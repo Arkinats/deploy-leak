@@ -123,7 +123,7 @@ sysctl --system
 
 echo "[INFO] Creating local TLS material"
 mkdir -p "$CERT_DIR"
-chmod 700 "$CERT_DIR"
+chmod 750 "$CERT_DIR"           # 750 lets the elasticsearch group traverse
 
 openssl req -x509 -nodes -days 1095 -newkey rsa:4096 \
   -keyout "$ES_HTTP_KEY" \
@@ -133,9 +133,17 @@ openssl req -x509 -nodes -days 1095 -newkey rsa:4096 \
 
 cp "$ES_HTTP_CERT" "$ES_HTTP_CA"
 
-chown -R root:elasticsearch "$CERT_DIR" 2>/dev/null || true
+# NOTE: ownership is applied AFTER elasticsearch is installed
+# (the 'elasticsearch' group does not exist until then).
 chmod 640 "$ES_HTTP_KEY"
 chmod 644 "$ES_HTTP_CERT" "$ES_HTTP_CA"
+
+# Apply SELinux cert context so the ES domain is allowed to read these files.
+if command -v semanage >/dev/null 2>&1 && getenforce 2>/dev/null | grep -qiE 'enforcing|permissive'; then
+  semanage fcontext -a -t cert_t "${CERT_DIR}(/.*)?" 2>/dev/null || \
+    semanage fcontext -m -t cert_t "${CERT_DIR}(/.*)?"
+  restorecon -R "$CERT_DIR"
+fi
 
 
 echo "[INFO] Installing Elasticsearch"
@@ -156,10 +164,15 @@ dnf -y install "elasticsearch-$ELASTIC_VERSION"
 backup_if_exists /etc/elasticsearch/elasticsearch.yml
 backup_if_exists /etc/elasticsearch/jvm.options
 
-#chown -R root:elasticsearch "$CERT_DIR"
-chown root:elasticsearch "$ES_HTTP_KEY"
+# Now that the elasticsearch user/group exist, apply ownership to the
+# entire cert directory so the JVM can traverse the dir and read the files.
+chown -R root:elasticsearch "$CERT_DIR"
+chmod 750 "$CERT_DIR"
+chmod 640 "$ES_HTTP_KEY"
+chmod 644 "$ES_HTTP_CERT" "$ES_HTTP_CA"
 
 cat > /etc/elasticsearch/elasticsearch.yml <<EOF
+
 cluster.name: leak-cluster
 node.name: ${LEAK_HOSTNAME}
 network.host: 0.0.0.0
@@ -188,12 +201,27 @@ EOF
 systemctl daemon-reload
 systemctl enable --now elasticsearch
 
-echo "[INFO] Setting elastic user password"
-sleep 20
-printf "%s\n%s\n" "$ADMIN_PASS" "$ADMIN_PASS" | \
-  /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -i
+echo "[INFO] Waiting for Elasticsearch to come up"
+# Poll the unauthenticated TLS endpoint; a 401 means ES is up and security is on.
+for i in $(seq 1 60); do
+  code=$(curl -sS --cacert "$ES_HTTP_CA" -o /dev/null -w "%{http_code}" \
+    "https://localhost:9200" || true)
+  if [[ "$code" == "401" || "$code" == "200" ]]; then
+    break
+  fi
+  sleep 5
+done
+if [[ "$code" != "401" && "$code" != "200" ]]; then
+  echo "[ERROR] Elasticsearch did not become reachable. Check: journalctl -u elasticsearch -n 200"
+  exit 1
+fi
 
-wait_for_url "https://localhost:9200" "$ES_HTTP_CA" "elastic:$ADMIN_PASS"
+echo "[INFO] Setting elastic user password"
+printf "%s\n%s\n" "$ADMIN_PASS" "$ADMIN_PASS" | \
+  /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -i -s -f
+
+wait_for_url "https://localhost:9200/_cluster/health" "$ES_HTTP_CA" "elastic:$ADMIN_PASS"
+
 
 echo "[INFO] Creating ILM policy for Logstash retention"
 curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
@@ -231,7 +259,17 @@ echo "[INFO] Installing Kibana"
 dnf -y install "kibana-$ELASTIC_VERSION"
 backup_if_exists /etc/kibana/kibana.yml
 
-KIBANA_TOKEN=$(/usr/share/elasticsearch/bin/elasticsearch-service-tokens create elastic/kibana leak-kibana-token | awk -F'= ' '{print $2}')
+# Use the runtime API so the token is immediately valid against the running cluster.
+# (The CLI variant requires an ES restart to be picked up.)
+KIBANA_TOKEN=$(curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
+  -X POST "https://localhost:9200/_security/service/elastic/kibana/credential/token/leak-kibana-token" \
+  | sed -n 's/.*"value":"\([^"]*\)".*/\1/p')
+
+if [[ -z "$KIBANA_TOKEN" ]]; then
+  echo "[ERROR] Failed to create Kibana service account token"
+  exit 1
+fi
+
 
 cat > /etc/kibana/kibana.yml <<EOF
 server.host: "0.0.0.0"
