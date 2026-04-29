@@ -255,6 +255,21 @@ curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
     }
   }"
 
+echo "[INFO] Creating index template for Zeek logs"
+curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
+  -H "Content-Type: application/json" \
+  -X PUT "https://localhost:9200/_index_template/leak-zeek-template" \
+  -d "{
+    \"index_patterns\": [\"zeek-*\"],
+    \"template\": {
+      \"settings\": {
+        \"index.lifecycle.name\": \"leak-logstash-retention\",
+        \"number_of_shards\": 1,
+        \"number_of_replicas\": 0
+      }
+    }
+  }"
+
 echo "[INFO] Installing Kibana"
 dnf -y install "kibana-$ELASTIC_VERSION"
 backup_if_exists /etc/kibana/kibana.yml
@@ -322,19 +337,64 @@ filter {
 }
 
 output {
-  elasticsearch {
-    hosts => ["https://localhost:9200"]
-    user => "elastic"
-    password => "\${ES_PWD}"
-    ssl_enabled => true
-    ssl_certificate_authorities => ["/etc/logstash/certs/elastic-http-ca.crt"]
-    index => "logstash-%{+YYYY.MM.dd}"
+  if [type] != "zeek" {
+    elasticsearch {
+      hosts => ["https://localhost:9200"]
+      user => "elastic"
+      password => "\${ES_PWD}"
+      ssl_enabled => true
+      ssl_certificate_authorities => ["/etc/logstash/certs/elastic-http-ca.crt"]
+      index => "logstash-%{+YYYY.MM.dd}"
+    }
   }
 }
 EOF
 
 chown root:logstash /etc/logstash/conf.d/leak.conf
 chmod 640 /etc/logstash/conf.d/leak.conf
+
+cat > /etc/logstash/conf.d/zeek.conf <<'EOF'
+input {
+  file {
+    path           => "/opt/zeek/logs/current/*.log"
+    start_position => "beginning"
+    sincedb_path   => "/var/lib/logstash/sincedb_zeek"
+    codec          => "json"
+    type           => "zeek"
+    mode           => "tail"
+  }
+}
+
+filter {
+  if [type] == "zeek" {
+    # Zeek emits epoch-seconds in 'ts' — promote it to @timestamp
+    date {
+      match  => [ "ts", "UNIX" ]
+      target => "@timestamp"
+    }
+    # Tag each event with the Zeek log it came from (conn, dns, http, ssl, ...)
+    grok {
+      match => { "path" => "/(?<zeek_log_type>[^/]+)\.log$" }
+    }
+  }
+}
+
+output {
+  if [type] == "zeek" {
+    elasticsearch {
+      hosts                       => ["https://localhost:9200"]
+      user                        => "elastic"
+      password                    => "${ES_PWD}"
+      ssl_enabled                 => true
+      ssl_certificate_authorities => ["/etc/logstash/certs/elastic-http-ca.crt"]
+      index                       => "zeek-%{+YYYY.MM.dd}"
+    }
+  }
+}
+EOF
+
+chown root:logstash /etc/logstash/conf.d/zeek.conf
+chmod 640 /etc/logstash/conf.d/zeek.conf
 
 systemctl enable --now logstash
 
@@ -399,6 +459,148 @@ fi
 
 systemctl enable --now arkimecapture arkimeviewer
 
+###############################################################################
+# Zeek Network Security Monitor (LTS)
+# Shares the same monitor interface as Arkime — both use AF_PACKET so the
+# kernel hands a copy of each frame to each daemon. No conflict.
+###############################################################################
+echo "[INFO] Installing Zeek (LTS)"
+
+# --- NIC offload disable -----------------------------------------------------
+# Hardware offloads mangle frame boundaries before they reach userspace, which
+# breaks both Zeek's and Arkime's view of the wire. Disable them persistently
+# via a templated systemd unit keyed on the interface name.
+cat > /etc/systemd/system/disable-nic-offload@.service <<'EOF'
+[Unit]
+Description=Disable NIC offloads on %i for accurate packet capture
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ethtool -K %i rx off tx off sg off tso off gso off gro off lro off
+ExecStart=/usr/sbin/ip link set dev %i promisc on
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now "disable-nic-offload@${ARK_IFACE}.service"
+
+# --- Repository + install ----------------------------------------------------
+curl -fsSL "https://download.opensuse.org/repositories/security:/zeek/RHEL_9/security:zeek.repo" \
+  -o /etc/yum.repos.d/zeek.repo
+
+dnf -y install zeek-lts
+
+# Make /opt/zeek/bin globally available for interactive use
+cat > /etc/profile.d/zeek.sh <<'EOF'
+export PATH="$PATH:/opt/zeek/bin"
+EOF
+
+# --- Configuration -----------------------------------------------------------
+backup_if_exists /opt/zeek/etc/node.cfg
+backup_if_exists /opt/zeek/etc/networks.cfg
+backup_if_exists /opt/zeek/etc/zeekctl.cfg
+backup_if_exists /opt/zeek/share/zeek/site/local.zeek
+
+# Single-node standalone — matches your single-node ES deployment
+cat > /opt/zeek/etc/node.cfg <<EOF
+[zeek]
+type=standalone
+host=localhost
+interface=${ARK_IFACE}
+EOF
+
+# RFC1918 space treated as local; adjust for your environment as needed
+cat > /opt/zeek/etc/networks.cfg <<'EOF'
+10.0.0.0/8       Private IP space
+172.16.0.0/12    Private IP space
+192.168.0.0/16   Private IP space
+EOF
+
+# Log rotation aligned with the script's RETENTION_DAYS prompt
+cat > /opt/zeek/etc/zeekctl.cfg <<EOF
+LogRotationInterval = 3600
+LogExpireInterval = ${RETENTION_DAYS}day
+StatsLogExpireInterval = ${RETENTION_DAYS}day
+MailTo = root@localhost
+SendMail =
+LogDir = /opt/zeek/logs
+SpoolDir = /opt/zeek/spool
+CompressLogs = 1
+EOF
+
+# Site policy — emit JSON so Logstash can ingest with the json codec
+cat > /opt/zeek/share/zeek/site/local.zeek <<'EOF'
+@load policy/tuning/json-logs.zeek
+@load policy/protocols/conn/known-services
+@load policy/protocols/ssl/validate-certs
+@load frameworks/files/hash-all-files
+EOF
+
+# --- systemd service ---------------------------------------------------------
+# zeekctl deploy = check + install + stop + start (canonical start path)
+cat > /etc/systemd/system/zeek.service <<EOF
+[Unit]
+Description=Zeek Network Security Monitor
+After=network-online.target disable-nic-offload@${ARK_IFACE}.service
+Wants=network-online.target
+Requires=disable-nic-offload@${ARK_IFACE}.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/opt/zeek/bin/zeekctl install
+ExecStart=/opt/zeek/bin/zeekctl deploy
+ExecStop=/opt/zeek/bin/zeekctl stop
+ExecReload=/opt/zeek/bin/zeekctl restart
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Periodic health check — restarts crashed nodes, prunes old logs
+cat > /etc/systemd/system/zeekctl-cron.service <<'EOF'
+[Unit]
+Description=Zeek health check (zeekctl cron)
+After=zeek.service
+Requires=zeek.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/zeek/bin/zeekctl cron
+EOF
+
+cat > /etc/systemd/system/zeekctl-cron.timer <<'EOF'
+[Unit]
+Description=Run zeekctl cron every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Unit=zeekctl-cron.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# Logstash needs to read Zeek's current logs
+chmod 755 /opt/zeek /opt/zeek/logs
+mkdir -p /opt/zeek/logs/current
+chmod 755 /opt/zeek/logs/current
+
+systemctl daemon-reload
+systemctl enable --now zeek.service
+systemctl enable --now zeekctl-cron.timer
+
+# Brief readiness check — non-fatal so deploy can continue
+sleep 5
+/opt/zeek/bin/zeekctl status || \
+  echo "[WARN] Zeek not yet healthy. Run: /opt/zeek/bin/zeekctl diag"
+
 echo "[INFO] Configuring firewall"
 #firewall-cmd --permanent --remove-port=9200/tcp || true
 firewall-cmd --permanent --remove-port=5601/tcp || true
@@ -421,6 +623,7 @@ systemctl is-active --quiet kibana
 systemctl is-active --quiet logstash
 systemctl is-active --quiet arkimeviewer
 systemctl is-active --quiet arkimecapture
+systemctl is-active --quiet zeek
 
 curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" "https://localhost:9200/_cluster/health?pretty"
 
@@ -430,10 +633,17 @@ echo "================================================="
 echo "Elasticsearch : https://${LEAK_HOSTNAME}:9200"
 echo "Kibana        : ${KIBANA_PUBLIC}"
 echo "Arkime        : https://${LEAK_HOSTNAME}:8005"
+echo "Zeek          : standalone on ${ARK_IFACE}  (logs: /opt/zeek/logs/current/)"
 echo "Admin User    : ${ADMIN_USER}"
-echo "Retention     : ${RETENTION_DAYS} days for logstash-* via ILM"
+echo "Retention     : ${RETENTION_DAYS} days for logstash-* and zeek-* via ILM"
 echo "Backups       : ${BACKUP_DIR}"
 echo "TLS CA        : ${ES_HTTP_CA}"
 echo
-systemctl status elasticsearch kibana logstash arkimeviewer arkimecapture --no-pager
+echo "Zeek troubleshooting:"
+echo "  /opt/zeek/bin/zeekctl status"
+echo "  /opt/zeek/bin/zeekctl diag"
+echo "  journalctl -u zeek -n 100"
+echo "  ls -la /opt/zeek/logs/current/"
+echo
+systemctl status elasticsearch kibana logstash arkimeviewer arkimecapture zeek --no-pager
 
