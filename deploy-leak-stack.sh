@@ -178,6 +178,9 @@ node.name: ${LEAK_HOSTNAME}
 network.host: 0.0.0.0
 discovery.type: single-node
 
+path.data: /var/lib/elasticsearch
+path.logs: /var/log/elasticsearch
+
 xpack.security.enabled: true
 xpack.security.enrollment.enabled: false
 
