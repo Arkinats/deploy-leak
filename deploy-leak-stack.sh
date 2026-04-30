@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 ###############################################################################
 # LEAK Stack Deployment Script
-# Target OS : Rocky Linux 9.7
+# Target OS : Rocky Linux 9.x
 # Stack     : Elasticsearch 8.13.x, Kibana 8.13.x, Logstash 8.13.x, Arkime 5.x
 ###############################################################################
 
@@ -69,8 +69,8 @@ require_root
 OS_ID=$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
 OS_VER=$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
 
-if [[ "$OS_ID" != "rocky" || "$OS_VER" != "9.7" ]]; then
-  echo "Unsupported OS: $OS_ID $OS_VER. Requires Rocky Linux 9.7."
+if [[ "$OS_ID" != "rocky" || ! "$OS_VER" =~ ^9(\.|$) ]]; then
+  echo "Unsupported OS: $OS_ID $OS_VER. Requires Rocky Linux 9.x."
   exit 1
 fi
 
