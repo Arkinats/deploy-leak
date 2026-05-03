@@ -212,8 +212,11 @@ if [[ "$code" != "401" && "$code" != "200" ]]; then
 fi
 
 echo "[INFO] Setting elastic user password"
+# -b: batch mode (skip the y/N "are you sure?" confirmation)
+# -i: interactive — read new password from stdin (twice: enter + confirm)
+# Drop -s so we can see what the tool is actually doing if it fails.
 printf "%s\n%s\n" "$ADMIN_PASS" "$ADMIN_PASS" | \
-  /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -i -s -f
+  /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -i -b
 
 wait_for_url "https://localhost:9200/_cluster/health" "$ES_HTTP_CA" "elastic:$ADMIN_PASS"
 
