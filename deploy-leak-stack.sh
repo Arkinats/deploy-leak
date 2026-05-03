@@ -81,7 +81,17 @@ read -rp "Server Hostname / FQDN: " LEAK_HOSTNAME
 read -rp "Timezone [America/Denver]: " TIMEZONE
 TIMEZONE=${TIMEZONE:-America/Denver}
 
-read -rp "Primary Arkime Interface (example: eno1): " ARK_IFACE
+interfaces=$(ls /sys/class/net | tr '\n' ' ')
+read -rp "Primary Arkime Interface (${interfaces}): " ARK_IFACE
+read -rp "Server IP for Elasticsearch certificate SAN [auto-detect]: " LEAK_IP
+if [[ -z "$LEAK_IP" ]]; then
+  LEAK_IP=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if ($i=="src") print $(i+1)}')
+fi
+if [[ -z "$LEAK_IP" ]]; then
+  echo "Could not auto-detect server IP. Please enter it manually."
+  exit 1
+fi
+
 read -rp "Arkime PCAP Storage Path [/data/pcap]: " PCAP_PATH
 PCAP_PATH=${PCAP_PATH:-/data/pcap}
 
@@ -96,8 +106,10 @@ if [[ ! "$ES_HEAP" =~ ^[0-9]+[gGmM]$ ]]; then
   exit 1
 fi
 
+KIBANA_PUBLIC_DEFAULT="https://$(echo "${LEAK_HOSTNAME}.${ORG_NAME}" | tr '[:upper:]' '[:lower:]'):5601"
+read -rp "Kibana Public Base URL [${KIBANA_PUBLIC_DEFAULT}]: " KIBANA_PUBLIC
+KIBANA_PUBLIC=${KIBANA_PUBLIC:-$KIBANA_PUBLIC_DEFAULT}
 
-read -rp "Kibana Public Base URL (example: https://leak.example.com:5601): " KIBANA_PUBLIC
 read -rp "Allowed source CIDR for web access [current subnet or admin IP recommended]: " ALLOWED_CIDR
 
 read -rp "Admin Username: " ADMIN_USER
