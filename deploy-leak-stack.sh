@@ -88,7 +88,15 @@ PCAP_PATH=${PCAP_PATH:-/data/pcap}
 read -rp "Retention Period (days) [30]: " RETENTION_DAYS
 RETENTION_DAYS=${RETENTION_DAYS:-30}
 
-read -rp "Elasticsearch Heap Size (example: 4g): " ES_HEAP
+read -rp "Elasticsearch Heap Size [4g]): " ES_HEAP
+# Set a default heap size of 4G if none entered.
+ES_HEAP=${ES_HEAP:-4g}
+if [[ ! "$ES_HEAP" =~ ^[0-9]+[gGmM]$ ]]; then
+  echo "Invalid heap size: $ES_HEAP. Use values like 2g, 4g, or 512m."
+  exit 1
+fi
+
+
 read -rp "Kibana Public Base URL (example: https://leak.example.com:5601): " KIBANA_PUBLIC
 read -rp "Allowed source CIDR for web access [current subnet or admin IP recommended]: " ALLOWED_CIDR
 
