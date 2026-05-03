@@ -47,9 +47,12 @@ wait_for_url() {
   return 1
 }
 
-backup_if_exists() {
+ backup_if_exists() {
   local file="$1"
-  [[ -f "$file" ]] && cp -a "$file" "$BACKUP_DIR"/
+  if [[ -f "$file" ]]; then
+    cp -a "$file" "$BACKUP_DIR"/
+  fi
+  return 0
 }
 
 prompt_secret_confirmed() {
@@ -439,6 +442,16 @@ systemctl enable --now logstash
 echo "[INFO] Installing Arkime"
 mkdir -p "$PCAP_PATH"
 dnf -y install "https://github.com/arkime/arkime/releases/download/v${ARKIME_VERSION}/arkime-${ARKIME_VERSION}-1.el9.x86_64.rpm"
+
+# Arkime ships /opt/arkime/etc/config.ini.sample but does NOT create
+# config.ini — the user is expected to copy it. That is done here so all the
+# subsequent sed -i calls have a real file to operate on. 
+# because we only copy when config.ini is absent.
+if [[ ! -f /opt/arkime/etc/config.ini ]]; then
+  cp /opt/arkime/etc/config.ini.sample /opt/arkime/etc/config.ini
+  chown arkime:arkime /opt/arkime/etc/config.ini
+  chmod 640 /opt/arkime/etc/config.ini
+fi
 
 backup_if_exists /opt/arkime/etc/config.ini
 
