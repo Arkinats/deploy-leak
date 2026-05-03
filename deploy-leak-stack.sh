@@ -443,15 +443,82 @@ echo "[INFO] Installing Arkime"
 mkdir -p "$PCAP_PATH"
 dnf -y install "https://github.com/arkime/arkime/releases/download/v${ARKIME_VERSION}/arkime-${ARKIME_VERSION}-1.el9.x86_64.rpm"
 
-# Arkime ships /opt/arkime/etc/config.ini.sample but does NOT create
-# config.ini — the user is expected to copy it. That is done here so all the
-# subsequent sed -i calls have a real file to operate on. 
-# because we only copy when config.ini is absent.
+# --- Arkime: things the RPM doesn't do for us -------------------------------
+# The Arkime RPM ships only the binaries. The Configure helper script (which
+# we don't run because it's interactive) is what normally creates the system
+# user, installs the systemd units, and seeds config.ini. We do it explicitly.
+
+# 1. Create the arkime system user/group (idempotent).
+if ! getent group arkime >/dev/null; then
+  groupadd --system arkime
+fi
+if ! getent passwd arkime >/dev/null; then
+  useradd --system --no-create-home --gid arkime \
+    --home-dir /opt/arkime --shell /sbin/nologin arkime
+fi
+
+# 2. Seed config.ini from the shipped sample if it isn't there yet.
 if [[ ! -f /opt/arkime/etc/config.ini ]]; then
   cp /opt/arkime/etc/config.ini.sample /opt/arkime/etc/config.ini
   chown arkime:arkime /opt/arkime/etc/config.ini
   chmod 640 /opt/arkime/etc/config.ini
 fi
+
+# 3. Make sure /opt/arkime is owned by the arkime user end-to-end so the
+#    viewer (which runs as 'arkime') can read what it needs.
+chown -R arkime:arkime /opt/arkime
+
+# 4. Install systemd units. arkimecapture needs root for AF_PACKET / raw
+#    socket access; arkimeviewer can drop privileges to the arkime user.
+cat > /etc/systemd/system/arkimecapture.service <<'EOF'
+[Unit]
+Description=Arkime Capture
+After=network-online.target elasticsearch.service
+Wants=network-online.target
+Requires=elasticsearch.service
+
+[Service]
+Type=simple
+ExecStart=/opt/arkime/bin/capture -c /opt/arkime/etc/config.ini
+WorkingDirectory=/opt/arkime
+User=root
+Restart=on-failure
+RestartSec=10s
+LimitMEMLOCK=infinity
+LimitCORE=infinity
+LimitNOFILE=128000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/arkimeviewer.service <<'EOF'
+[Unit]
+Description=Arkime Viewer
+After=network-online.target elasticsearch.service arkimecapture.service
+Wants=network-online.target
+Requires=elasticsearch.service
+
+[Service]
+Type=simple
+ExecStart=/opt/arkime/bin/node viewer.js -c /opt/arkime/etc/config.ini
+WorkingDirectory=/opt/arkime/viewer
+User=arkime
+Group=arkime
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+
+# Generate the Arkime password secret (used to encrypt stored creds in ES)
+# and the ES basic-auth string. ARKIME_BASIC_AUTH is plain 'user:pass' —
+# Arkime base64-encodes it itself when forming the Authorization header.
+ARKIME_SECRET=$(openssl rand -hex 32)
+ARKIME_BASIC_AUTH="elastic:${ADMIN_PASS}"
 
 backup_if_exists /opt/arkime/etc/config.ini
 
@@ -464,6 +531,24 @@ do
     && sed -i "s|^${setting%%=*}=.*|$setting|" /opt/arkime/etc/config.ini \
     || echo "$setting" >> /opt/arkime/etc/config.ini
 done
+
+# Required: Arkime uses this to encrypt user passwords/keys stored in ES.
+grep -q '^passwordSecret=' /opt/arkime/etc/config.ini \
+  && sed -i "s|^passwordSecret=.*|passwordSecret=${ARKIME_SECRET}|" /opt/arkime/etc/config.ini \
+  || echo "passwordSecret=${ARKIME_SECRET}" >> /opt/arkime/etc/config.ini
+
+# Set the capture interface and pcap path while we're in here.
+grep -q '^interface=' /opt/arkime/etc/config.ini \
+  && sed -i "s|^interface=.*|interface=${ARK_IFACE}|" /opt/arkime/etc/config.ini \
+  || echo "interface=${ARK_IFACE}" >> /opt/arkime/etc/config.ini
+
+grep -q '^pcapDir=' /opt/arkime/etc/config.ini \
+  && sed -i "s|^pcapDir=.*|pcapDir=${PCAP_PATH}|" /opt/arkime/etc/config.ini \
+  || echo "pcapDir=${PCAP_PATH}" >> /opt/arkime/etc/config.ini
+
+grep -q '^elasticsearch=' /opt/arkime/etc/config.ini \
+  && sed -i "s|^elasticsearch=.*|elasticsearch=https://localhost:9200|" /opt/arkime/etc/config.ini \
+  || echo "elasticsearch=https://localhost:9200" >> /opt/arkime/etc/config.ini
 
 # Make sure no stale httpsPort/keyFile/certFile lines remain from package defaults
 sed -i \
