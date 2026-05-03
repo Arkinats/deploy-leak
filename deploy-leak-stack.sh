@@ -11,7 +11,7 @@ ELASTIC_VERSION="8.13.4"
 ARKIME_VERSION="5.3.0"
 
 LOG_FILE="/var/log/leak-stack-deploy.log"
-CERT_DIR="/etc/leak/tls"
+CERT_DIR="/etc/elasticsearch/certs"
 BACKUP_DIR="/root/leak-backups-$(date +%F-%H%M)"
 
 SYSCTL_FILE="/etc/sysctl.d/99-leak.conf"
@@ -129,6 +129,23 @@ EOF
 
 sysctl --system
 
+
+echo "[INFO] Installing Elasticsearch"
+rpm --import https://artifacts.elastic.co/GPG-KEY-elasticsearch
+
+cat > /etc/yum.repos.d/elastic.repo <<EOF
+[elastic-8.x]
+name=Elastic repository
+baseurl=https://artifacts.elastic.co/packages/8.x/yum
+gpgcheck=1
+enabled=1
+autorefresh=1
+type=rpm-md
+EOF
+
+dnf -y install "elasticsearch-$ELASTIC_VERSION"
+
+# Generate self signed certs for Elastic
 echo "[INFO] Creating local TLS material"
 mkdir -p "$CERT_DIR"
 chmod 750 "$CERT_DIR"           # 750 lets the elasticsearch group traverse
@@ -147,28 +164,16 @@ chmod 640 "$ES_HTTP_KEY"
 chmod 644 "$ES_HTTP_CERT" "$ES_HTTP_CA"
 
 # Apply SELinux cert context so the ES domain is allowed to read these files.
-if command -v semanage >/dev/null 2>&1 && getenforce 2>/dev/null | grep -qiE 'enforcing|permissive'; then
-  semanage fcontext -a -t cert_t "${CERT_DIR}(/.*)?" 2>/dev/null || \
-    semanage fcontext -m -t cert_t "${CERT_DIR}(/.*)?"
-  restorecon -R "$CERT_DIR"
-fi
+# if command -v semanage >/dev/null 2>&1 && getenforce 2>/dev/null | grep -qiE 'enforcing|permissive'; then
+#  semanage fcontext -a -t cert_t "${CERT_DIR}(/.*)?" 2>/dev/null || \
+#    semanage fcontext -m -t cert_t "${CERT_DIR}(/.*)?"
+#  restorecon -R "$CERT_DIR"
+#fi
+# /etc/elasticsearch/certs inherits the correct SELinux context from
+# /etc/elasticsearch (etc_t), so no explicit fcontext rule is needed.
+restorecon -R "$CERT_DIR" 2>/dev/null || true
 
-
-echo "[INFO] Installing Elasticsearch"
-rpm --import https://artifacts.elastic.co/GPG-KEY-elasticsearch
-
-cat > /etc/yum.repos.d/elastic.repo <<EOF
-[elastic-8.x]
-name=Elastic repository
-baseurl=https://artifacts.elastic.co/packages/8.x/yum
-gpgcheck=1
-enabled=1
-autorefresh=1
-type=rpm-md
-EOF
-
-dnf -y install "elasticsearch-$ELASTIC_VERSION"
-
+# Continue with the Elastic config and install
 backup_if_exists /etc/elasticsearch/elasticsearch.yml
 backup_if_exists /etc/elasticsearch/jvm.options
 
@@ -415,6 +420,26 @@ dnf -y install "https://github.com/arkime/arkime/releases/download/v${ARKIME_VER
 
 backup_if_exists /opt/arkime/etc/config.ini
 
+# Generate a dedicated self-signed cert for the Arkime viewer (port 8005).
+# Arkime needs its own key/cert because the ES private key is mode 640
+# root:elasticsearch and the arkime user can't read it.
+ARK_CERT_DIR="/opt/arkime/etc/certs"
+ARK_KEY="${ARK_CERT_DIR}/arkime-viewer.key"
+ARK_CERT="${ARK_CERT_DIR}/arkime-viewer.crt"
+
+mkdir -p "$ARK_CERT_DIR"
+
+openssl req -x509 -nodes -days 1095 -newkey rsa:4096 \
+  -keyout "$ARK_KEY" \
+  -out "$ARK_CERT" \
+  -subj "/CN=$LEAK_HOSTNAME/O=$ORG_NAME" \
+  -addext "subjectAltName=DNS:$LEAK_HOSTNAME,DNS:localhost,IP:127.0.0.1"
+
+chown -R arkime:arkime "$ARK_CERT_DIR"
+chmod 750 "$ARK_CERT_DIR"
+chmod 640 "$ARK_KEY"
+chmod 644 "$ARK_CERT"
+
 ARKIME_SECRET=$(openssl rand -hex 32)
 ARKIME_BASIC_AUTH=$(printf "elastic:%s" "$ADMIN_PASS" | base64 -w0)
 
@@ -425,10 +450,12 @@ sed -i \
   -e "s/^passwordSecret=.*/passwordSecret=${ARKIME_SECRET}/" \
   /opt/arkime/etc/config.ini
 
+# httpsPort uses the Arkime-owned cert; keyFile/certFile here are for
+# the viewer's TLS, NOT for talking to Elasticsearch (that's caTrustFile below).
 for setting in \
   "httpsPort=8005" \
-  "keyFile=${ES_HTTP_KEY}" \
-  "certFile=${ES_HTTP_CERT}"
+  "keyFile=${ARK_KEY}" \
+  "certFile=${ARK_CERT}"
 do
   grep -q "^${setting%%=*}=" /opt/arkime/etc/config.ini \
     && sed -i "s|^${setting%%=*}=.*|$setting|" /opt/arkime/etc/config.ini \
