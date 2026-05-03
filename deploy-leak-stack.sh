@@ -166,7 +166,7 @@ openssl req -x509 -nodes -days 1095 -newkey rsa:4096 \
   -keyout "$ES_HTTP_KEY" \
   -out "$ES_HTTP_CERT" \
   -subj "/CN=$LEAK_HOSTNAME/O=$ORG_NAME" \
-  -addext "subjectAltName=DNS:$LEAK_HOSTNAME,DNS:localhost,IP:127.0.0.1"
+  -addext "subjectAltName=DNS:$LEAK_HOSTNAME,DNS:${LEAK_HOSTNAME,,},DNS:localhost,IP:127.0.0.1,IP:$LEAK_IP"
 
 cp "$ES_HTTP_CERT" "$ES_HTTP_CA"
 
