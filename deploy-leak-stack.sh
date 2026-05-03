@@ -8,7 +8,7 @@
 set -euo pipefail
 
 ELASTIC_VERSION="8.13.4"
-ARKIME_VERSION="5.3.0"
+ARKIME_VERSION="6.1.1"
 
 LOG_FILE="/var/log/leak-stack-deploy.log"
 CERT_DIR="/etc/elasticsearch/certs"
@@ -342,8 +342,12 @@ cp "$ES_HTTP_CA" /etc/logstash/certs/elastic-http-ca.crt
 chown -R root:logstash /etc/logstash/certs
 chmod 640 /etc/logstash/certs/elastic-http-ca.crt
 
-/usr/share/logstash/bin/logstash-keystore --path.settings /etc/logstash create || true
-printf "%s" "$ADMIN_PASS" | /usr/share/logstash/bin/logstash-keystore --path.settings /etc/logstash add ES_PWD --stdin --force
+# Suppress the y/N keystore-password prompt by piping 'y'. The || true
+# keeps re-runs idempotent (the create command errors if the keystore exists).
+echo y | /usr/share/logstash/bin/logstash-keystore --path.settings /etc/logstash create || true
+# logstash-keystore add reads from stdin via --stdin and overwrites existing keys silently.
+printf "%s" "$ADMIN_PASS" | \
+  /usr/share/logstash/bin/logstash-keystore --path.settings /etc/logstash add ES_PWD --stdin
 
 cat > /etc/logstash/conf.d/leak.conf <<EOF
 input {
@@ -434,7 +438,7 @@ systemctl enable --now logstash
 
 echo "[INFO] Installing Arkime"
 mkdir -p "$PCAP_PATH"
-dnf -y install "https://github.com/arkime/arkime/releases/download/v${ARKIME_VERSION}/arkime_${ARKIME_VERSION}-1.x86_64.rpm"
+dnf -y install "https://github.com/arkime/arkime/releases/download/v${ARKIME_VERSION}/arkime-${ARKIME_VERSION}-1.el9.x86_64.rpm"
 
 backup_if_exists /opt/arkime/etc/config.ini
 
