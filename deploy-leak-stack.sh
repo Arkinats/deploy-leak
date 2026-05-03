@@ -71,13 +71,6 @@ prompt_secret_confirmed() {
 
   printf '%s' "$pass1"
 }
-echo "[INFO] Setting elastic user password"
-printf "%s\n%s\n" "$ADMIN_PASS" "$ADMIN_PASS" | \
-  /usr/share/elasticsearch/bin/elasticsearch-reset-password \
-    -u elastic \
-    -i \
-    -b \
-    --url "https://localhost:9200"
 
 require_root
 
@@ -229,7 +222,7 @@ echo "[INFO] Setting elastic user password"
 # -i: interactive — read new password from stdin (twice: enter + confirm)
 # Drop -s so we can see what the tool is actually doing if it fails.
 printf "%s\n%s\n" "$ADMIN_PASS" "$ADMIN_PASS" | \
-  /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -i -b
+  /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -i -b --url "https://localhost:9200"
 
 wait_for_url "https://localhost:9200/_cluster/health" "$ES_HTTP_CA" "elastic:$ADMIN_PASS"
 
