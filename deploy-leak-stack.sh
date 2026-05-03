@@ -85,14 +85,6 @@ TIMEZONE=${TIMEZONE:-America/Denver}
 
 interfaces=$(ls /sys/class/net | tr '\n' ' ')
 read -rp "Primary Arkime Interface (${interfaces}): " ARK_IFACE
-read -rp "Server IP for Elasticsearch certificate SAN [auto-detect]: " LEAK_IP
-if [[ -z "$LEAK_IP" ]]; then
-  LEAK_IP=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if ($i=="src") print $(i+1)}')
-fi
-if [[ -z "$LEAK_IP" ]]; then
-  echo "Could not auto-detect server IP. Please enter it manually."
-  exit 1
-fi
 
 read -rp "Arkime PCAP Storage Path [/data/pcap]: " PCAP_PATH
 PCAP_PATH=${PCAP_PATH:-/data/pcap}
@@ -277,16 +269,46 @@ echo "[INFO] Installing Kibana"
 dnf -y install "kibana-$ELASTIC_VERSION"
 backup_if_exists /etc/kibana/kibana.yml
 
-# Use the runtime API so the token is immediately valid against the running cluster.
-# (The CLI variant requires an ES restart to be picked up.)
-KIBANA_TOKEN=$(curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
-  -X POST "https://localhost:9200/_security/service/elastic/kibana/credential/token/leak-kibana-token" \
-  | sed -n 's/.*"value":"\([^"]*\)".*/\1/p')
-
-if [[ -z "$KIBANA_TOKEN" ]]; then
-  echo "[ERROR] Failed to create Kibana service account token"
+# Sanity-check that the elastic password actually works before doing anything.
+# If reset-password silently failed, we want to know HERE, not later.
+echo "[INFO] Verifying elastic credentials"
+AUTH_CHECK=$(curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
+  -o /dev/null -w "%{http_code}" "https://localhost:9200/_security/_authenticate" || echo "000")
+if [[ "$AUTH_CHECK" != "200" ]]; then
+  echo "[ERROR] Cannot authenticate to Elasticsearch as 'elastic' (HTTP $AUTH_CHECK)"
+  echo "        The password reset on line ~226 likely did not take effect."
+  echo "        Try manually: /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -i"
   exit 1
 fi
+
+# Delete any pre-existing token of the same name. Returns 404 on first run
+# (which is fine) or 200 on a re-run where the token already exists. This is
+# what makes this section idempotent across script reruns.
+echo "[INFO] Removing any prior Kibana service token"
+curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
+  -X DELETE "https://localhost:9200/_security/service/elastic/kibana/credential/token/leak-kibana-token" \
+  >/dev/null || true
+
+# Create the token. Capture the full response so we can show it on failure.
+echo "[INFO] Creating Kibana service account token"
+KIBANA_TOKEN_RESPONSE=$(curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
+  -X POST "https://localhost:9200/_security/service/elastic/kibana/credential/token/leak-kibana-token")
+
+# Prefer jq if available; fall back to sed.
+if command -v jq >/dev/null 2>&1; then
+  KIBANA_TOKEN=$(echo "$KIBANA_TOKEN_RESPONSE" | jq -r '.token.value // empty')
+else
+  KIBANA_TOKEN=$(echo "$KIBANA_TOKEN_RESPONSE" | sed -n 's/.*"value":"\([^"]*\)".*/\1/p')
+fi
+
+if [[ -z "$KIBANA_TOKEN" ]]; then
+  echo "[ERROR] Failed to create Kibana service account token."
+  echo "        ES response was:"
+  echo "$KIBANA_TOKEN_RESPONSE"
+  exit 1
+fi
+
+echo "[INFO] Kibana token obtained (length: ${#KIBANA_TOKEN} chars)"
 
 
 cat > /etc/kibana/kibana.yml <<EOF
