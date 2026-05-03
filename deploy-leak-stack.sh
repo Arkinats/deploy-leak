@@ -57,14 +57,27 @@ prompt_secret_confirmed() {
   local pass1 pass2
 
   while true; do
-    read -rsp "$prompt: " pass1; echo
-    read -rsp "Confirm $prompt: " pass2; echo
-    [[ "$pass1" == "$pass2" && -n "$pass1" ]] && break
-    echo "Passwords do not match or are empty"
+    read -rsp "$prompt: " pass1 < /dev/tty
+    echo >&2
+    read -rsp "Confirm $prompt: " pass2 < /dev/tty
+    echo >&2
+
+    if [[ "$pass1" == "$pass2" && ${#pass1} -ge 6 ]]; then
+      break
+    fi
+
+    echo "Passwords do not match or are shorter than 6 characters" >&2
   done
 
   printf '%s' "$pass1"
 }
+echo "[INFO] Setting elastic user password"
+printf "%s\n%s\n" "$ADMIN_PASS" "$ADMIN_PASS" | \
+  /usr/share/elasticsearch/bin/elasticsearch-reset-password \
+    -u elastic \
+    -i \
+    -b \
+    --url "https://localhost:9200"
 
 require_root
 
