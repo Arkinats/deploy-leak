@@ -17,9 +17,11 @@ BACKUP_DIR="/root/leak-backups-$(date +%F-%H%M)"
 SYSCTL_FILE="/etc/sysctl.d/99-leak.conf"
 LIMITS_FILE="/etc/security/limits.d/99-leak.conf"
 
-ES_HTTP_CA="$CERT_DIR/elastic-http-ca.crt"
-ES_HTTP_KEY="$CERT_DIR/elastic-http.key"
-ES_HTTP_CERT="$CERT_DIR/elastic-http.crt"
+# Elasticsearch auto-generates these during package install.
+# We now reference them directly instead of generating our own. Smooth criminal.
+ES_HTTP_CA="/etc/elasticsearch/certs/http_ca.crt"
+ES_HTTP_KEYSTORE="/etc/elasticsearch/certs/http.p12"
+ES_TRANSPORT_KEYSTORE="/etc/elasticsearch/certs/transport.p12"
 
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'echo "[ERROR] Deployment failed at line $LINENO"; exit 1' ERR
@@ -157,30 +159,6 @@ EOF
 
 dnf -y install "elasticsearch-$ELASTIC_VERSION"
 
-# Generate self signed certs for Elastic
-echo "[INFO] Creating local TLS material"
-mkdir -p "$CERT_DIR"
-chmod 750 "$CERT_DIR"           # 750 lets the elasticsearch group traverse
-
-openssl req -x509 -nodes -days 1095 -newkey rsa:4096 \
-  -keyout "$ES_HTTP_KEY" \
-  -out "$ES_HTTP_CERT" \
-  -subj "/CN=$LEAK_HOSTNAME/O=$ORG_NAME" \
-  -addext "subjectAltName=DNS:$LEAK_HOSTNAME,DNS:${LEAK_HOSTNAME,,},DNS:localhost,IP:127.0.0.1,IP:$LEAK_IP"
-
-cp "$ES_HTTP_CERT" "$ES_HTTP_CA"
-
-# NOTE: ownership is applied AFTER elasticsearch is installed
-# (the 'elasticsearch' group does not exist until then).
-chmod 640 "$ES_HTTP_KEY"
-chmod 644 "$ES_HTTP_CERT" "$ES_HTTP_CA"
-
-# Apply SELinux cert context so the ES domain is allowed to read these files.
-# if command -v semanage >/dev/null 2>&1 && getenforce 2>/dev/null | grep -qiE 'enforcing|permissive'; then
-#  semanage fcontext -a -t cert_t "${CERT_DIR}(/.*)?" 2>/dev/null || \
-#    semanage fcontext -m -t cert_t "${CERT_DIR}(/.*)?"
-#  restorecon -R "$CERT_DIR"
-#fi
 # /etc/elasticsearch/certs inherits the correct SELinux context from
 # /etc/elasticsearch (etc_t), so no explicit fcontext rule is needed.
 restorecon -R "$CERT_DIR" 2>/dev/null || true
@@ -189,15 +167,11 @@ restorecon -R "$CERT_DIR" 2>/dev/null || true
 backup_if_exists /etc/elasticsearch/elasticsearch.yml
 backup_if_exists /etc/elasticsearch/jvm.options
 
-# Now that the elasticsearch user/group exist, apply ownership to the
-# entire cert directory so the JVM can traverse the dir and read the files.
-chown -R root:elasticsearch "$CERT_DIR"
-chmod 750 "$CERT_DIR"
-chmod 640 "$ES_HTTP_KEY"
-chmod 644 "$ES_HTTP_CERT" "$ES_HTTP_CA"
+# Elasticsearch installs its own cert directory at /etc/elasticsearch/certs
+# with correct ownership and permissions — no manual fixup required.
+# Removed cert creation.
 
 cat > /etc/elasticsearch/elasticsearch.yml <<EOF
-
 cluster.name: leak-cluster
 node.name: ${LEAK_HOSTNAME}
 network.host: 0.0.0.0
@@ -207,18 +181,19 @@ path.data: /var/lib/elasticsearch
 path.logs: /var/log/elasticsearch
 
 xpack.security.enabled: true
-xpack.security.enrollment.enabled: false
+xpack.security.enrollment.enabled: true
 
+# HTTP layer — uses the auto-generated PKCS12 keystore.
+# The keystore password is stored in the Elasticsearch secure keystore
+# under xpack.security.http.ssl.keystore.secure_password.
 xpack.security.http.ssl.enabled: true
-xpack.security.http.ssl.key: ${ES_HTTP_KEY}
-xpack.security.http.ssl.certificate: ${ES_HTTP_CERT}
-xpack.security.http.ssl.certificate_authorities: [ "${ES_HTTP_CA}" ]
+xpack.security.http.ssl.keystore.path: ${ES_HTTP_KEYSTORE}
 
+# Transport layer (inter-node, even on a single-node cluster) — same idea.
 xpack.security.transport.ssl.enabled: true
 xpack.security.transport.ssl.verification_mode: certificate
-xpack.security.transport.ssl.key: ${ES_HTTP_KEY}
-xpack.security.transport.ssl.certificate: ${ES_HTTP_CERT}
-xpack.security.transport.ssl.certificate_authorities: [ "${ES_HTTP_CA}" ]
+xpack.security.transport.ssl.keystore.path: ${ES_TRANSPORT_KEYSTORE}
+xpack.security.transport.ssl.truststore.path: ${ES_TRANSPORT_KEYSTORE}
 EOF
 
 cat > /etc/elasticsearch/jvm.options.d/leak.options <<EOF
@@ -432,47 +407,23 @@ dnf -y install "https://github.com/arkime/arkime/releases/download/v${ARKIME_VER
 
 backup_if_exists /opt/arkime/etc/config.ini
 
-# Generate a dedicated self-signed cert for the Arkime viewer (port 8005).
-# Arkime needs its own key/cert because the ES private key is mode 640
-# root:elasticsearch and the arkime user can't read it.
-ARK_CERT_DIR="/opt/arkime/etc/certs"
-ARK_KEY="${ARK_CERT_DIR}/arkime-viewer.key"
-ARK_CERT="${ARK_CERT_DIR}/arkime-viewer.crt"
-
-mkdir -p "$ARK_CERT_DIR"
-
-openssl req -x509 -nodes -days 1095 -newkey rsa:4096 \
-  -keyout "$ARK_KEY" \
-  -out "$ARK_CERT" \
-  -subj "/CN=$LEAK_HOSTNAME/O=$ORG_NAME" \
-  -addext "subjectAltName=DNS:$LEAK_HOSTNAME,DNS:localhost,IP:127.0.0.1"
-
-chown -R arkime:arkime "$ARK_CERT_DIR"
-chmod 750 "$ARK_CERT_DIR"
-chmod 640 "$ARK_KEY"
-chmod 644 "$ARK_CERT"
-
-ARKIME_SECRET=$(openssl rand -hex 32)
-ARKIME_BASIC_AUTH=$(printf "elastic:%s" "$ADMIN_PASS" | base64 -w0)
-
-sed -i \
-  -e "s/^interface=.*/interface=${ARK_IFACE}/" \
-  -e "s|^pcapDir=.*|pcapDir=${PCAP_PATH}|" \
-  -e "s|^elasticsearch=.*|elasticsearch=https://localhost:9200|" \
-  -e "s/^passwordSecret=.*/passwordSecret=${ARKIME_SECRET}/" \
-  /opt/arkime/etc/config.ini
-
-# httpsPort uses the Arkime-owned cert; keyFile/certFile here are for
-# the viewer's TLS, NOT for talking to Elasticsearch (that's caTrustFile below).
+# Arkime viewer runs HTTP on 8005 — front it with a reverse proxy if you
+# need TLS. Talking TO Elasticsearch still uses TLS (caTrustFile below).
 for setting in \
-  "httpsPort=8005" \
-  "keyFile=${ARK_KEY}" \
-  "certFile=${ARK_CERT}"
+  "viewPort=8005"
 do
   grep -q "^${setting%%=*}=" /opt/arkime/etc/config.ini \
     && sed -i "s|^${setting%%=*}=.*|$setting|" /opt/arkime/etc/config.ini \
     || echo "$setting" >> /opt/arkime/etc/config.ini
 done
+
+# Make sure no stale httpsPort/keyFile/certFile lines remain from package defaults
+sed -i \
+  -e 's/^httpsPort=.*/#httpsPort=/' \
+  -e 's|^keyFile=.*|#keyFile=|' \
+  -e 's|^certFile=.*|#certFile=|' \
+  /opt/arkime/etc/config.ini
+
 
 grep -q '^caTrustFile=' /opt/arkime/etc/config.ini \
   && sed -i "s|^caTrustFile=.*|caTrustFile=${ES_HTTP_CA}|" /opt/arkime/etc/config.ini \
