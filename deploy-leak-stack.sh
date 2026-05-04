@@ -41,7 +41,7 @@ wait_for_url() {
   local auth="$3"
   local tries=60
 
-  echo "Waiting for url: (${url}) - (${count})."
+  echo "Waiting for url: $url - $count."
   for i in $(seq 1 "$tries"); do
     if curl -sS --cacert "$ca" -u "$auth" "$url" >/dev/null 2>&1; then
       return 0
@@ -57,7 +57,7 @@ wait_for_url() {
 backup_if_exists() {
   local file="$1"
   if [[ -f "$file" ]]; then
-    echo "┌ Copying (${file}) to (${BACKUP_DIR})"
+    echo "┌ Copying $file to $BACKUP_DIR"
     cp -a "$file" "$BACKUP_DIR"/
     echo "└ Complete!"
   fi
@@ -139,7 +139,9 @@ dnf -y install epel-release curl wget git java-17-openjdk \
 
 systemctl enable --now firewalld
 
-echo "[INFO] Applying kernel and limits settings"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Applying kernel and limits settings                                   ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 cat > "$SYSCTL_FILE" <<EOF
 vm.max_map_count=262144
 net.core.rmem_max=134217728
@@ -280,6 +282,7 @@ curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
     }
   }"
 
+echo
 echo "╔══════════════════════════════════════════════════════════════════════════════╗"
 echo "║ [INFO] Creating index template for Zeek logs                                 ║"
 echo "╚══════════════════════════════════════════════════════════════════════════════╝"
@@ -297,6 +300,7 @@ curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
     }
   }"
 
+echo
 echo "╔══════════════════════════════════════════════════════════════════════════════╗"
 echo "║ [INFO] Installing Kibana                                                     ║"
 echo "╚══════════════════════════════════════════════════════════════════════════════╝"
@@ -553,8 +557,7 @@ systemctl daemon-reload
 # and the ES basic-auth string. ARKIME_BASIC_AUTH is plain 'user:pass' —
 # Arkime base64-encodes it itself when forming the Authorization header.
 ARKIME_SECRET=$(openssl rand -hex 32)
-ARKIME_BASIC_AUTH="elastic:${ADMIN_PASS}"
-echo "Arkime : (${ARKIME_SECRET})"
+ARKIME_BASIC_AUTH=$(printf "elastic:%s" "$ADMIN_PASS" | base64 -w0)
 
 backup_if_exists /opt/arkime/etc/config.ini
 
@@ -616,7 +619,12 @@ grep -q '^rotateIndex=' /opt/arkime/etc/config.ini \
 chown -R arkime:arkime "$PCAP_PATH" 2>/dev/null || true
 
 if [[ -x /opt/arkime/db/db.pl ]]; then
-  /opt/arkime/db/db.pl --insecure --esuser elastic --espass "$ADMIN_PASS" https://localhost:9200 init
+  # Embed credentials in the URL.
+  # --force skips the interactive 'INIT' confirmation prompt.
+  # --insecure tells the Perl LWP client to accept the self-signed http_ca.crt.
+  /opt/arkime/db/db.pl --insecure \
+    "https://elastic:${ADMIN_PASS}@localhost:9200" \
+    init
 fi
 
 /opt/arkime/bin/arkime_add_user.sh \
