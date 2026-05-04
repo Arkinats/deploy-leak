@@ -57,9 +57,9 @@ wait_for_url() {
 backup_if_exists() {
   local file="$1"
   if [[ -f "$file" ]]; then
-    echo "  - Copying (${file}) to (${BACKUP_DIR})"
+    echo "┌ Copying (${file}) to (${BACKUP_DIR})"
     cp -a "$file" "$BACKUP_DIR"/
-    echo "  Complete!"
+    echo "└ Complete!"
   fi
   return 0
 }
@@ -245,6 +245,7 @@ printf "%s\n%s\n" "$ADMIN_PASS" "$ADMIN_PASS" | \
 
 wait_for_url "https://localhost:9200/_cluster/health" "$ES_HTTP_CA" "elastic:$ADMIN_PASS"
 
+echo 
 echo "╔══════════════════════════════════════════════════════════════════════════════╗"
 echo "║ [INFO] Creating ILM policy for Logstash retention                            ║"
 echo "╚══════════════════════════════════════════════════════════════════════════════╝"
@@ -296,7 +297,9 @@ curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
     }
   }"
 
-echo "[INFO] Installing Kibana"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Installing Kibana                                                     ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 dnf -y install "kibana-$ELASTIC_VERSION"
 backup_if_exists /etc/kibana/kibana.yml
 
@@ -551,8 +554,8 @@ systemctl daemon-reload
 # Arkime base64-encodes it itself when forming the Authorization header.
 ARKIME_SECRET=$(openssl rand -hex 32)
 ARKIME_BASIC_AUTH="elastic:${ADMIN_PASS}"
+echo "Arkime : (${ARKIME_SECRET})"
 
-echo "- Check backup_if_exists()"
 backup_if_exists /opt/arkime/etc/config.ini
 
 # Arkime viewer runs HTTP on 8005 — front it with a reverse proxy if you need TLS.
