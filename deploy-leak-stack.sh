@@ -530,25 +530,27 @@ do
   grep -q "^${setting%%=*}=" /opt/arkime/etc/config.ini \
     && sed -i "s|^${setting%%=*}=.*|$setting|" /opt/arkime/etc/config.ini \
     || echo "$setting" >> /opt/arkime/etc/config.ini
+
+  # Required: Arkime uses this to encrypt user passwords/keys stored in ES.
+  grep -q '^passwordSecret=' /opt/arkime/etc/config.ini \
+    && sed -i "s|^passwordSecret=.*|passwordSecret=${ARKIME_SECRET}|" /opt/arkime/etc/config.ini \
+    || echo "passwordSecret=${ARKIME_SECRET}" >> /opt/arkime/etc/config.ini
+
+  # Set the capture interface and pcap path while we're in here.
+  grep -q '^interface=' /opt/arkime/etc/config.ini \
+    && sed -i "s|^interface=.*|interface=${ARK_IFACE}|" /opt/arkime/etc/config.ini \
+    || echo "interface=${ARK_IFACE}" >> /opt/arkime/etc/config.ini
+
+  grep -q '^pcapDir=' /opt/arkime/etc/config.ini \
+    && sed -i "s|^pcapDir=.*|pcapDir=${PCAP_PATH}|" /opt/arkime/etc/config.ini \
+    || echo "pcapDir=${PCAP_PATH}" >> /opt/arkime/etc/config.ini
+
+  grep -q '^elasticsearch=' /opt/arkime/etc/config.ini \
+    && sed -i "s|^elasticsearch=.*|elasticsearch=https://localhost:9200|" /opt/arkime/etc/config.ini \
+    || echo "elasticsearch=https://localhost:9200" >> /opt/arkime/etc/config.ini
 done
 
-# Required: Arkime uses this to encrypt user passwords/keys stored in ES.
-grep -q '^passwordSecret=' /opt/arkime/etc/config.ini \
-  && sed -i "s|^passwordSecret=.*|passwordSecret=${ARKIME_SECRET}|" /opt/arkime/etc/config.ini \
-  || echo "passwordSecret=${ARKIME_SECRET}" >> /opt/arkime/etc/config.ini
 
-# Set the capture interface and pcap path while we're in here.
-grep -q '^interface=' /opt/arkime/etc/config.ini \
-  && sed -i "s|^interface=.*|interface=${ARK_IFACE}|" /opt/arkime/etc/config.ini \
-  || echo "interface=${ARK_IFACE}" >> /opt/arkime/etc/config.ini
-
-grep -q '^pcapDir=' /opt/arkime/etc/config.ini \
-  && sed -i "s|^pcapDir=.*|pcapDir=${PCAP_PATH}|" /opt/arkime/etc/config.ini \
-  || echo "pcapDir=${PCAP_PATH}" >> /opt/arkime/etc/config.ini
-
-grep -q '^elasticsearch=' /opt/arkime/etc/config.ini \
-  && sed -i "s|^elasticsearch=.*|elasticsearch=https://localhost:9200|" /opt/arkime/etc/config.ini \
-  || echo "elasticsearch=https://localhost:9200" >> /opt/arkime/etc/config.ini
 
 # Make sure no stale httpsPort/keyFile/certFile lines remain from package defaults
 sed -i \
