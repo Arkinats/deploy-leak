@@ -561,59 +561,40 @@ ARKIME_BASIC_AUTH=$(printf "elastic:%s" "$ADMIN_PASS" | base64 -w0)
 
 backup_if_exists /opt/arkime/etc/config.ini
 
-# Arkime viewer runs HTTP on 8005 — front it with a reverse proxy if you need TLS.
-grep -q '^viewPort=' /opt/arkime/etc/config.ini \
-  && sed -i "s|^viewPort=.*|viewPort=8005|" /opt/arkime/etc/config.ini \
-  || echo "viewPort=8005" >> /opt/arkime/etc/config.ini
+# Rewrite config.ini with a known-good [default] section. The sample's
+# other sections (if any) get preserved BELOW this; the [default] section
+# wins because it's first and explicit.
+ARKIME_TMP=$(mktemp)
 
-# Required: Arkime uses this to encrypt user passwords/keys stored in ES.
-grep -q '^passwordSecret=' /opt/arkime/etc/config.ini \
-  && sed -i "s|^passwordSecret=.*|passwordSecret=${ARKIME_SECRET}|" /opt/arkime/etc/config.ini \
-  || echo "passwordSecret=${ARKIME_SECRET}" >> /opt/arkime/etc/config.ini
+# Strip any pre-existing [default] section + its keys from the sample,
+# keep everything else.
+awk '
+  /^\[default\]/ { in_default=1; next }
+  /^\[/         { in_default=0 }
+  !in_default   { print }
+' /opt/arkime/etc/config.ini > "$ARKIME_TMP"
 
-# Capture interface and PCAP path.
-grep -q '^interface=' /opt/arkime/etc/config.ini \
-  && sed -i "s|^interface=.*|interface=${ARK_IFACE}|" /opt/arkime/etc/config.ini \
-  || echo "interface=${ARK_IFACE}" >> /opt/arkime/etc/config.ini
+# Write our own [default] section at the top, then append the rest.
+{
+  echo "[default]"
+  echo "elasticsearch=https://localhost:9200"
+  echo "elasticsearchBasicAuth=elastic:${ADMIN_PASS}"
+  echo "usersElasticsearch=https://localhost:9200"
+  echo "usersElasticsearchBasicAuth=elastic:${ADMIN_PASS}"
+  echo "caTrustFile=${ES_HTTP_CA}"
+  echo "passwordSecret=${ARKIME_SECRET}"
+  echo "interface=${ARK_IFACE}"
+  echo "pcapDir=${PCAP_PATH}"
+  echo "viewPort=8005"
+  echo "authMode=digest"
+  echo "rotateIndex=daily"
+  echo ""
+  cat "$ARKIME_TMP"
+} > /opt/arkime/etc/config.ini
 
-grep -q '^pcapDir=' /opt/arkime/etc/config.ini \
-  && sed -i "s|^pcapDir=.*|pcapDir=${PCAP_PATH}|" /opt/arkime/etc/config.ini \
-  || echo "pcapDir=${PCAP_PATH}" >> /opt/arkime/etc/config.ini
-
-grep -q '^elasticsearch=' /opt/arkime/etc/config.ini \
-  && sed -i "s|^elasticsearch=.*|elasticsearch=https://localhost:9200|" /opt/arkime/etc/config.ini \
-  || echo "elasticsearch=https://localhost:9200" >> /opt/arkime/etc/config.ini
-
-# Make sure no stale httpsPort/keyFile/certFile lines remain from package defaults.
-sed -i \
-  -e 's/^httpsPort=.*/#httpsPort=/' \
-  -e 's|^keyFile=.*|#keyFile=|' \
-  -e 's|^certFile=.*|#certFile=|' \
-  /opt/arkime/etc/config.ini
-
-grep -q '^caTrustFile=' /opt/arkime/etc/config.ini \
-  && sed -i "s|^caTrustFile=.*|caTrustFile=${ES_HTTP_CA}|" /opt/arkime/etc/config.ini \
-  || echo "caTrustFile=${ES_HTTP_CA}" >> /opt/arkime/etc/config.ini
-
-grep -q '^elasticsearchBasicAuth=' /opt/arkime/etc/config.ini \
-  && sed -i "s|^elasticsearchBasicAuth=.*|elasticsearchBasicAuth=${ARKIME_BASIC_AUTH}|" /opt/arkime/etc/config.ini \
-  || echo "elasticsearchBasicAuth=${ARKIME_BASIC_AUTH}" >> /opt/arkime/etc/config.ini
-
-grep -q '^usersElasticsearch=' /opt/arkime/etc/config.ini \
-  && sed -i "s|^usersElasticsearch=.*|usersElasticsearch=https://localhost:9200|" /opt/arkime/etc/config.ini \
-  || echo "usersElasticsearch=https://localhost:9200" >> /opt/arkime/etc/config.ini
-
-grep -q '^usersElasticsearchBasicAuth=' /opt/arkime/etc/config.ini \
-  && sed -i "s|^usersElasticsearchBasicAuth=.*|usersElasticsearchBasicAuth=${ARKIME_BASIC_AUTH}|" /opt/arkime/etc/config.ini \
-  || echo "usersElasticsearchBasicAuth=${ARKIME_BASIC_AUTH}" >> /opt/arkime/etc/config.ini
-
-grep -q '^authMode=' /opt/arkime/etc/config.ini \
-  && sed -i "s/^authMode=.*/authMode=digest/" /opt/arkime/etc/config.ini \
-  || echo "authMode=digest" >> /opt/arkime/etc/config.ini
-
-grep -q '^rotateIndex=' /opt/arkime/etc/config.ini \
-  && sed -i "s/^rotateIndex=.*/rotateIndex=daily/" /opt/arkime/etc/config.ini \
-  || echo "rotateIndex=daily" >> /opt/arkime/etc/config.ini
+rm -f "$ARKIME_TMP"
+chown arkime:arkime /opt/arkime/etc/config.ini
+chmod 640 /opt/arkime/etc/config.ini
 
 
 chown -R arkime:arkime "$PCAP_PATH" 2>/dev/null || true
