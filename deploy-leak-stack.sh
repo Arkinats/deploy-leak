@@ -47,7 +47,7 @@ wait_for_url() {
   return 1
 }
 
- backup_if_exists() {
+backup_if_exists() {
   local file="$1"
   if [[ -f "$file" ]]; then
     cp -a "$file" "$BACKUP_DIR"/
@@ -87,7 +87,7 @@ fi
 
 mkdir -p "$BACKUP_DIR"
 
-read -rp "Organization / Environment Name: " ORG_NAME
+read -rp "Organization / Domain Name: " ORG_NAME
 read -rp "Server Hostname / FQDN: " LEAK_HOSTNAME
 read -rp "Timezone [America/Denver]: " TIMEZONE
 TIMEZONE=${TIMEZONE:-America/Denver}
@@ -101,7 +101,7 @@ PCAP_PATH=${PCAP_PATH:-/data/pcap}
 read -rp "Retention Period (days) [30]: " RETENTION_DAYS
 RETENTION_DAYS=${RETENTION_DAYS:-30}
 
-read -rp "Elasticsearch Heap Size [4g]): " ES_HEAP
+read -rp "Elasticsearch Heap Size [4g]: " ES_HEAP
 # Set a default heap size of 4G if none entered.
 ES_HEAP=${ES_HEAP:-4g}
 if [[ ! "$ES_HEAP" =~ ^[0-9]+[gGmM]$ ]]; then
@@ -522,43 +522,35 @@ ARKIME_BASIC_AUTH="elastic:${ADMIN_PASS}"
 
 backup_if_exists /opt/arkime/etc/config.ini
 
-# Arkime viewer runs HTTP on 8005 — front it with a reverse proxy if you
-# need TLS. Talking TO Elasticsearch still uses TLS (caTrustFile below).
-for setting in \
-  "viewPort=8005"
-do
-  grep -q "^${setting%%=*}=" /opt/arkime/etc/config.ini \
-    && sed -i "s|^${setting%%=*}=.*|$setting|" /opt/arkime/etc/config.ini \
-    || echo "$setting" >> /opt/arkime/etc/config.ini
+# Arkime viewer runs HTTP on 8005 — front it with a reverse proxy if you need TLS.
+grep -q '^viewPort=' /opt/arkime/etc/config.ini \
+  && sed -i "s|^viewPort=.*|viewPort=8005|" /opt/arkime/etc/config.ini \
+  || echo "viewPort=8005" >> /opt/arkime/etc/config.ini
 
-  # Required: Arkime uses this to encrypt user passwords/keys stored in ES.
-  grep -q '^passwordSecret=' /opt/arkime/etc/config.ini \
-    && sed -i "s|^passwordSecret=.*|passwordSecret=${ARKIME_SECRET}|" /opt/arkime/etc/config.ini \
-    || echo "passwordSecret=${ARKIME_SECRET}" >> /opt/arkime/etc/config.ini
+# Required: Arkime uses this to encrypt user passwords/keys stored in ES.
+grep -q '^passwordSecret=' /opt/arkime/etc/config.ini \
+  && sed -i "s|^passwordSecret=.*|passwordSecret=${ARKIME_SECRET}|" /opt/arkime/etc/config.ini \
+  || echo "passwordSecret=${ARKIME_SECRET}" >> /opt/arkime/etc/config.ini
 
-  # Set the capture interface and pcap path while we're in here.
-  grep -q '^interface=' /opt/arkime/etc/config.ini \
-    && sed -i "s|^interface=.*|interface=${ARK_IFACE}|" /opt/arkime/etc/config.ini \
-    || echo "interface=${ARK_IFACE}" >> /opt/arkime/etc/config.ini
+# Capture interface and PCAP path.
+grep -q '^interface=' /opt/arkime/etc/config.ini \
+  && sed -i "s|^interface=.*|interface=${ARK_IFACE}|" /opt/arkime/etc/config.ini \
+  || echo "interface=${ARK_IFACE}" >> /opt/arkime/etc/config.ini
 
-  grep -q '^pcapDir=' /opt/arkime/etc/config.ini \
-    && sed -i "s|^pcapDir=.*|pcapDir=${PCAP_PATH}|" /opt/arkime/etc/config.ini \
-    || echo "pcapDir=${PCAP_PATH}" >> /opt/arkime/etc/config.ini
+grep -q '^pcapDir=' /opt/arkime/etc/config.ini \
+  && sed -i "s|^pcapDir=.*|pcapDir=${PCAP_PATH}|" /opt/arkime/etc/config.ini \
+  || echo "pcapDir=${PCAP_PATH}" >> /opt/arkime/etc/config.ini
 
-  grep -q '^elasticsearch=' /opt/arkime/etc/config.ini \
-    && sed -i "s|^elasticsearch=.*|elasticsearch=https://localhost:9200|" /opt/arkime/etc/config.ini \
-    || echo "elasticsearch=https://localhost:9200" >> /opt/arkime/etc/config.ini
-done
+grep -q '^elasticsearch=' /opt/arkime/etc/config.ini \
+  && sed -i "s|^elasticsearch=.*|elasticsearch=https://localhost:9200|" /opt/arkime/etc/config.ini \
+  || echo "elasticsearch=https://localhost:9200" >> /opt/arkime/etc/config.ini
 
-
-
-# Make sure no stale httpsPort/keyFile/certFile lines remain from package defaults
+# Make sure no stale httpsPort/keyFile/certFile lines remain from package defaults.
 sed -i \
   -e 's/^httpsPort=.*/#httpsPort=/' \
   -e 's|^keyFile=.*|#keyFile=|' \
   -e 's|^certFile=.*|#certFile=|' \
   /opt/arkime/etc/config.ini
-
 
 grep -q '^caTrustFile=' /opt/arkime/etc/config.ini \
   && sed -i "s|^caTrustFile=.*|caTrustFile=${ES_HTTP_CA}|" /opt/arkime/etc/config.ini \
@@ -583,6 +575,7 @@ grep -q '^authMode=' /opt/arkime/etc/config.ini \
 grep -q '^rotateIndex=' /opt/arkime/etc/config.ini \
   && sed -i "s/^rotateIndex=.*/rotateIndex=daily/" /opt/arkime/etc/config.ini \
   || echo "rotateIndex=daily" >> /opt/arkime/etc/config.ini
+
 
 chown -R arkime:arkime "$PCAP_PATH" 2>/dev/null || true
 
