@@ -57,7 +57,9 @@ wait_for_url() {
 backup_if_exists() {
   local file="$1"
   if [[ -f "$file" ]]; then
+    echo "  - Copying (${file}) to (${BACKUP_DIR})"
     cp -a "$file" "$BACKUP_DIR"/
+    echo "  Complete!"
   fi
   return 0
 }
@@ -125,9 +127,9 @@ read -rp "Allowed source CIDR for web access [current subnet or admin IP recomme
 read -rp "Admin Username: " ADMIN_USER
 ADMIN_PASS=$(prompt_secret_confirmed "Admin Password")
 
-echo "╔════════════════════════════════════════════════╗"
-echo "║ [INFO] Preparing OS                            ║"
-echo "╚════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Preparing OS                                                          ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 hostnamectl set-hostname "$LEAK_HOSTNAME"
 timedatectl set-timezone "$TIMEZONE"
 
@@ -153,9 +155,9 @@ EOF
 
 sysctl --system
 
-echo "╔════════════════════════════════════════════════╗"
-echo "║ [INFO] Installing Elasticsearch                ║"
-echo "╚════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Installing Elasticsearch                                              ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 rpm --import https://artifacts.elastic.co/GPG-KEY-elasticsearch
 
 cat > /etc/yum.repos.d/elastic.repo <<EOF
@@ -215,9 +217,9 @@ EOF
 systemctl daemon-reload
 systemctl enable --now elasticsearch
 
-echo "╔════════════════════════════════════════════════╗"
-echo "║ [INFO] Waiting for Elasticsearch to come up    ║"
-echo "╚════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Waiting for Elasticsearch to come up                                  ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 # Poll the unauthenticated TLS endpoint; a 401 means ES is up and security is on.
 for i in $(seq 1 60); do
   code=$(curl -sS --cacert "$ES_HTTP_CA" -o /dev/null -w "%{http_code}" \
@@ -232,9 +234,9 @@ if [[ "$code" != "401" && "$code" != "200" ]]; then
   exit 1
 fi
 
-echo "╔════════════════════════════════════════════════╗"
-echo "║ [INFO] Setting elastic user password           ║"
-echo "╚════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Setting elastic user password                                         ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 # -b: batch mode (skip the y/N "are you sure?" confirmation)
 # -i: interactive — read new password from stdin (twice: enter + confirm)
 # Drop -s so we can see what the tool is actually doing if it fails.
@@ -243,9 +245,9 @@ printf "%s\n%s\n" "$ADMIN_PASS" "$ADMIN_PASS" | \
 
 wait_for_url "https://localhost:9200/_cluster/health" "$ES_HTTP_CA" "elastic:$ADMIN_PASS"
 
-echo "╔═══════════════════════════════════════════════════╗"
-echo "║ [INFO] Creating ILM policy for Logstash retention ║"
-echo "╚═══════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Creating ILM policy for Logstash retention                            ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
   -H "Content-Type: application/json" \
   -X PUT "https://localhost:9200/_ilm/policy/leak-logstash-retention" \
@@ -277,9 +279,9 @@ curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
     }
   }"
 
-echo "╔════════════════════════════════════════════════╗"
-echo "║ [INFO] Creating index template for Zeek logs   ║"
-echo "╚════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Creating index template for Zeek logs                                 ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
   -H "Content-Type: application/json" \
   -X PUT "https://localhost:9200/_index_template/leak-zeek-template" \
@@ -300,7 +302,10 @@ backup_if_exists /etc/kibana/kibana.yml
 
 # Sanity-check that the elastic password actually works before doing anything.
 # If reset-password silently failed, we want to know HERE, not later.
-echo "[INFO] Verifying elastic credentials"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Verifying elastic credentials                                         ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+
 AUTH_CHECK=$(curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
   -o /dev/null -w "%{http_code}" "https://localhost:9200/_security/_authenticate" || echo "000")
 if [[ "$AUTH_CHECK" != "200" ]]; then
@@ -313,15 +318,18 @@ fi
 # Delete any pre-existing token of the same name. Returns 404 on first run
 # (which is fine) or 200 on a re-run where the token already exists. This is
 # what makes this section idempotent across script reruns.
-echo "╔════════════════════════════════════════════════╗"
-echo "║ [INFO] Removing any prior Kibana service token ║"
-echo "╚════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Removing any prior Kibana service token                               ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
   -X DELETE "https://localhost:9200/_security/service/elastic/kibana/credential/token/leak-kibana-token" \
   >/dev/null || true
 
 # Create the token. Capture the full response so we can show it on failure.
-echo "[INFO] Creating Kibana service account token"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Creating Kibana service account token                                 ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+
 KIBANA_TOKEN_RESPONSE=$(curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
   -X POST "https://localhost:9200/_security/service/elastic/kibana/credential/token/leak-kibana-token")
 
@@ -339,9 +347,9 @@ if [[ -z "$KIBANA_TOKEN" ]]; then
   exit 1
 fi
 
-echo "╔════════════════════════════════════════════════╗"
-echo "║ [INFO] Kibana token obtained (length: ${#KIBANA_TOKEN} chars) ║"
-echo "╚════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Kibana token obtained (length: ${#KIBANA_TOKEN} chars)                              ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 
 cat > /etc/kibana/kibana.yml <<EOF
 server.host: "0.0.0.0"
@@ -357,9 +365,9 @@ chmod 640 /etc/kibana/kibana.yml
 
 systemctl enable --now kibana
 
-echo "╔════════════════════════════════════════════════╗"
-echo "║ [INFO] Installing Logstash                     ║"
-echo "╚════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Installing Logstash                                                   ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 dnf -y install "logstash-$ELASTIC_VERSION"
 
 mkdir -p /etc/logstash/certs
@@ -461,9 +469,9 @@ chmod 640 /etc/logstash/conf.d/zeek.conf
 
 systemctl enable --now logstash
 
-echo "╔════════════════════════════════════════════════╗"
-echo "║ [INFO] Installing Arkime                       ║"
-echo "╚════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Installing Arkime                                                     ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 mkdir -p "$PCAP_PATH"
 dnf -y install "https://github.com/arkime/arkime/releases/download/v${ARKIME_VERSION}/arkime-${ARKIME_VERSION}-1.el9.x86_64.rpm"
 
@@ -618,9 +626,9 @@ systemctl enable --now arkimecapture arkimeviewer
 # Shares the same monitor interface as Arkime — both use AF_PACKET so the
 # kernel hands a copy of each frame to each daemon. No conflict.
 ###############################################################################
-echo "╔════════════════════════════════════════════════╗"
-echo "║ [INFO] Installing Zeek (LTS)                   ║"
-echo "╚════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Installing Zeek (LTS)                                                 ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 
 # --- NIC offload disable -----------------------------------------------------
 # Hardware offloads mangle frame boundaries before they reach userspace, which
@@ -757,9 +765,9 @@ sleep 5
 /opt/zeek/bin/zeekctl status || \
   echo "[WARN] Zeek not yet healthy. Run: /opt/zeek/bin/zeekctl diag"
 
-echo "╔════════════════════════════════════════════════╗"
-echo "║ [INFO] Configuring firewall                    ║"
-echo "╚════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Configuring firewall                                                  ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 #firewall-cmd --permanent --remove-port=9200/tcp || true
 firewall-cmd --permanent --remove-port=5601/tcp || true
 firewall-cmd --permanent --remove-port=8005/tcp || true
@@ -775,9 +783,9 @@ firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLO
 
 firewall-cmd --reload
 
-echo "╔════════════════════════════════════════════════╗"
-echo "║ [INFO] Validating services                     ║"
-echo "╚════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Validating services                                                   ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 systemctl is-active --quiet elasticsearch
 systemctl is-active --quiet kibana
 systemctl is-active --quiet logstash
@@ -787,11 +795,12 @@ systemctl is-active --quiet zeek
 
 curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" "https://localhost:9200/_cluster/health?pretty"
 
-echo "╔════════════════════════════════════════════════╗"
-echo "║ ============================================== ║"
-echo "║  LEAK STACK DEPLOYMENT COMPLETE                ║"
-echo "║ ============================================== ║"
-echo "╚════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ ╔══════════════════════════════════════════════════════════════════════════╗ ║"
+echo "║ ║ LEAK STACK DEPLOYMENT COMPLETE                                           ║ ║"
+echo "║ ╚══════════════════════════════════════════════════════════════════════════╝ ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+
 echo "Elasticsearch : https://${LEAK_HOSTNAME}:9200"
 echo "Kibana        : ${KIBANA_PUBLIC}"
 echo "Arkime        : https://${LEAK_HOSTNAME}:8005"
