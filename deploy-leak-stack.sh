@@ -2,12 +2,17 @@
 ###############################################################################
 # LEAK Stack Deployment Script
 # Target OS : Rocky Linux 9.x
-# Stack     : Elasticsearch 8.13.x, Kibana 8.13.x, Logstash 8.13.x, Arkime 5.x
+# Stack     : Elasticsearch 8.13.x, Kibana 8.13.x, Logstash 8.13.x, Arkime 6.1.1
 ###############################################################################
 echo "╔══════════════════════════════════════════════════════════════════════════════╗"
 echo "║ LEAK Stack Deployment Script                                                 ║"
 echo "║ Target OS : Rocky Linux 9.x                                                  ║"
-echo "║ Stack     : Elasticsearch 8.13.x, Kibana 8.13.x, Logstash 8.13.x, Arkime 5.x ║"
+echo "║ Stack     :─┬─Elasticsearch 8.13.x                                           ║"
+echo "║             ├─Kibana 8.13.x                                                  ║"
+echo "║             ├─Logstash 8.13.x                                                ║"
+echo "║             ├─Arkime 6.1.1                                                   ║"
+echo "║             ├─Zeek (CERN EL9)                                                ║"
+echo "║             └─Suricata (planned)                                             ║"
 echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 set -euo pipefail
 
@@ -46,7 +51,7 @@ wait_for_url() {
     if curl -sS --cacert "$ca" -u "$auth" "$url" >/dev/null 2>&1; then
       return 0
     fi
-    count+=1
+    count++
     sleep 5
   done
 
@@ -614,13 +619,47 @@ fi
 systemctl enable --now arkimecapture arkimeviewer
 
 ###############################################################################
-# Zeek Network Security Monitor (LTS)
-# Shares the same monitor interface as Arkime — both use AF_PACKET so the
-# kernel hands a copy of each frame to each daemon. No conflict.
+# Zeek Network Security Monitor — CERN EL9 packages
+# Shares the monitor interface with Arkime via AF_PACKET (kernel fans a copy
+# of each frame to each daemon — no conflict).
+# https://wlcg-soc-wg-doc.web.cern.ch/data_sources/zeek/deployment_zeek.html
 ###############################################################################
 echo "╔══════════════════════════════════════════════════════════════════════════════╗"
-echo "║ [INFO] Installing Zeek (LTS)                                                 ║"
+echo "║ [INFO] Installing Zeek (CERN EL9)                                            ║"
 echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+
+dnf config-manager --set-enabled crb
+dnf install -y libpcap-devel
+
+# Rocky 9 specific: python3-semantic_version-2.8.4-7 is a Zeek dep that isn't
+# packaged in any Rocky or EPEL repo. CERN guide directs us to AlmaLinux's
+# devel repo for the .rpm.
+SEMVER_RPM="python3-semantic_version-2.8.4-7.el9.noarch.rpm"
+SEMVER_URL="https://repo.almalinux.org/development/almalinux/9/devel/noarch/Packages/${SEMVER_RPM}"
+
+if ! rpm -q python3-semantic_version >/dev/null 2>&1; then
+  curl -fsSL -o "/tmp/${SEMVER_RPM}" "$SEMVER_URL"
+  dnf -y localinstall "/tmp/${SEMVER_RPM}"
+fi
+
+# CERN Zeek repo for EL9
+cat > /etc/yum.repos.d/cern-zeek.repo <<'EOF'
+[cern-zeek]
+name=CERN Zeek EL9 QA
+baseurl=https://linuxsoft.cern.ch/repos/zeek9-qa/$basearch/os/
+enabled=1
+gpgcheck=1
+priority=1
+EOF
+
+curl -fsSL -o /etc/pki/rpm-gpg/RPM-GPG-KEY-CERN \
+  https://linuxsoft.cern.ch/repos/RPM-GPG-KEY-kojiv2
+rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-CERN
+
+dnf clean all
+dnf -y install zeek
+
+echo "[INFO] Installed Zeek: $(/opt/zeek/bin/zeek --version 2>&1 | head -n1)"
 
 # --- NIC offload disable -----------------------------------------------------
 # Hardware offloads mangle frame boundaries before they reach userspace, which
@@ -645,11 +684,6 @@ EOF
 systemctl daemon-reload
 systemctl enable --now "disable-nic-offload@${ARK_IFACE}.service"
 
-# --- Repository + install ----------------------------------------------------
-curl -fsSL "https://download.opensuse.org/repositories/security:/zeek/RHEL_9/security:zeek.repo" \
-  -o /etc/yum.repos.d/zeek.repo
-
-dnf -y install zeek-lts
 
 # Make /opt/zeek/bin globally available for interactive use
 cat > /etc/profile.d/zeek.sh <<'EOF'
@@ -709,7 +743,6 @@ Requires=disable-nic-offload@${ARK_IFACE}.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStartPre=/opt/zeek/bin/zeekctl install
 ExecStart=/opt/zeek/bin/zeekctl deploy
 ExecStop=/opt/zeek/bin/zeekctl stop
 ExecReload=/opt/zeek/bin/zeekctl restart
@@ -745,8 +778,6 @@ EOF
 
 # Logstash needs to read Zeek's current logs
 chmod 755 /opt/zeek /opt/zeek/logs
-mkdir -p /opt/zeek/logs/current
-chmod 755 /opt/zeek/logs/current
 
 systemctl daemon-reload
 systemctl enable --now zeek.service
