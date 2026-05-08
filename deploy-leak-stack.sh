@@ -369,11 +369,15 @@ server.publicBaseUrl: "${KIBANA_PUBLIC}"
 
 elasticsearch.hosts: ["https://localhost:9200"]
 elasticsearch.serviceAccountToken: "${KIBANA_TOKEN}"
-elasticsearch.ssl.certificateAuthorities: ["${ES_HTTP_CA}"]
+elasticsearch.ssl.certificateAuthorities: ["/etc/kibana/http_ca.crt"]
 EOF
 
 chown root:kibana /etc/kibana/kibana.yml
 chmod 640 /etc/kibana/kibana.yml
+
+sudo cp /etc/elasticsearch/certs/http_ca.crt /etc/kibana/http_ca.crt
+sudo chown kibana:kibana /etc/kibana/http_ca.crt
+sudo chmod 644 /etc/kibana/http_ca.crt
 
 systemctl enable --now kibana
 
@@ -556,6 +560,10 @@ RestartSec=10s
 WantedBy=multi-user.target
 EOF
 
+sudo cp /etc/elasticsearch/certs/http_ca.crt /opt/arkime/etc/http_ca.crt
+sudo chown arkime:arkime /opt/arkime/etc/http_ca.crt
+sudo chmod 644 /opt/arkime/etc/http_ca.crt
+
 systemctl daemon-reload
 
 # Generate the Arkime password secret (used to encrypt stored creds in ES)
@@ -586,7 +594,7 @@ awk '
   echo "elasticsearchBasicAuth=elastic:${ADMIN_PASS}"
   echo "usersElasticsearch=https://localhost:9200"
   echo "usersElasticsearchBasicAuth=elastic:${ADMIN_PASS}"
-  echo "caTrustFile=${ES_HTTP_CA}"
+  echo "caTrustFile=/opt/arkime/etc/http_ca.crt"
   echo "passwordSecret=${ARKIME_SECRET}"
   echo "interface=${ARK_IFACE}"
   echo "pcapDir=${PCAP_PATH}"
@@ -631,15 +639,8 @@ echo "╚═══════════════════════�
 dnf config-manager --set-enabled crb
 dnf install -y libpcap-devel
 
-# Rocky 9 specific: python3-semantic_version-2.8.4-7 is a Zeek dep that isn't
-# packaged in any Rocky or EPEL repo. CERN guide directs us to AlmaLinux's
-# devel repo for the .rpm.
-SEMVER_RPM="python3-semantic_version-2.8.4-7.el9.noarch.rpm"
-SEMVER_URL="https://repo.almalinux.org/development/almalinux/9/devel/noarch/Packages/${SEMVER_RPM}"
-
 if ! rpm -q python3-semantic_version >/dev/null 2>&1; then
-  curl -fsSL -o "/tmp/${SEMVER_RPM}" "$SEMVER_URL"
-  dnf -y localinstall "/tmp/${SEMVER_RPM}"
+  dnf -y install python3-semantic_version
 fi
 
 # CERN Zeek repo for EL9
@@ -715,7 +716,7 @@ EOF
 cat > /opt/zeek/etc/zeekctl.cfg <<EOF
 LogRotationInterval = 3600
 LogExpireInterval = ${RETENTION_DAYS}day
-StatsLogExpireInterval = ${RETENTION_DAYS}day
+StatsLogExpireInterval = ${RETENTION_DAYS}
 MailTo = root@localhost
 SendMail =
 LogDir = /opt/zeek/logs
@@ -792,29 +793,36 @@ echo "╔═══════════════════════�
 echo "║ [INFO] Configuring firewall                                                  ║"
 echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 #firewall-cmd --permanent --remove-port=9200/tcp || true
-firewall-cmd --permanent --remove-port=5601/tcp || true
-firewall-cmd --permanent --remove-port=8005/tcp || true
-firewall-cmd --permanent --remove-port=5044/tcp || true
-firewall-cmd --permanent --remove-port=5140/tcp || true
-firewall-cmd --permanent --remove-port=5140/udp || true
+#firewall-cmd --permanent --remove-port=5601/tcp || true
+#firewall-cmd --permanent --remove-port=8005/tcp || true
+#firewall-cmd --permanent --remove-port=5044/tcp || true
+#firewall-cmd --permanent --remove-port=5140/tcp || true
+#firewall-cmd --permanent --remove-port=5140/udp || true
 
-firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=tcp port=5601 accept"
-firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=tcp port=8005 accept"
-firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=tcp port=5044 accept"
-firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=tcp port=5140 accept"
-firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=udp port=5140 accept"
+#firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=tcp port=5601 accept"
+#firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=tcp port=8005 accept"
+#firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=tcp port=5044 accept"
+#firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=tcp port=5140 accept"
+#firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=udp port=5140 accept"
+
+echo "5601/tcp : $(firewall-cmd --permanent --add-port=5601/tcp)"
+echo "8005/tcp : $(firewall-cmd --permanent --add-port=8005/tcp)"
+echo "8005/tcp : $(firewall-cmd --permanent --add-port=8005/tcp)"
+echo "5140/tcp : $(firewall-cmd --permanent --add-port=5140/tcp)"
+echo "5140/udp : $(firewall-cmd --permanent --add-port=5140/udp)"
+echo "5140/udp : $(firewall-cmd --permanent --add-port=5140/udp)"
 
 firewall-cmd --reload
 
 echo "╔══════════════════════════════════════════════════════════════════════════════╗"
 echo "║ [INFO] Validating services                                                   ║"
 echo "╚══════════════════════════════════════════════════════════════════════════════╝"
-systemctl is-active --quiet elasticsearch
-systemctl is-active --quiet kibana
-systemctl is-active --quiet logstash
-systemctl is-active --quiet arkimeviewer
-systemctl is-active --quiet arkimecapture
-systemctl is-active --quiet zeek
+echo "elasticsearch : $(systemctl is-active elasticsearch)"
+echo "kibana        : $(systemctl is-active kibana)"
+echo "logstash      : $(systemctl is-active logstash)"
+echo "arkimeviewer  : $(systemctl is-active arkimeviewer)"
+echo "arkimecapture : $(systemctl is-active arkimecapture)"
+echo "zeek          : $(systemctl is-active zeek)"
 
 curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" "https://localhost:9200/_cluster/health?pretty"
 
