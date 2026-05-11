@@ -107,7 +107,15 @@ read -rp "Timezone [America/Denver]: " TIMEZONE
 TIMEZONE=${TIMEZONE:-America/Denver}
 
 interfaces=$(ls /sys/class/net | tr '\n' ' ')
-read -rp "Primary Arkime Interface (${interfaces}): " ARK_IFACE
+while true; do
+    read -rp "Primary Arkime Interface (${interfaces}): " ARK_IFACE
+
+    if [[ -n "$ARK_IFACE" && -d "/sys/class/net/$ARK_IFACE" ]]; then
+        break
+    fi
+
+    echo "Invalid interface: '$ARK_IFACE'. Please choose one from: $interfaces"
+done
 
 read -rp "Arkime PCAP Storage Path [/data/pcap]: " PCAP_PATH
 PCAP_PATH=${PCAP_PATH:-/data/pcap}
@@ -127,7 +135,8 @@ KIBANA_PUBLIC_DEFAULT="https://$(echo "${LEAK_HOSTNAME}.${ORG_NAME}" | tr '[:upp
 read -rp "Kibana Public Base URL [${KIBANA_PUBLIC_DEFAULT}]: " KIBANA_PUBLIC
 KIBANA_PUBLIC=${KIBANA_PUBLIC:-$KIBANA_PUBLIC_DEFAULT}
 
-read -rp "Allowed source CIDR for web access [current subnet or admin IP recommended]: " ALLOWED_CIDR
+# read -rp "Allowed source CIDR for web access [current subnet or admin IP recommended]: " ALLOWED_CIDR
+# Removed for now, using pretty open firewall rules.
 
 read -rp "Admin Username: " ADMIN_USER
 ADMIN_PASS=$(prompt_secret_confirmed "Admin Password")
