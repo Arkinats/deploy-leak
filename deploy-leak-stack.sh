@@ -12,7 +12,7 @@ echo "║             ├─Kibana 8.13.x                                       
 echo "║             ├─Logstash 8.13.x                                                ║"
 echo "║             ├─Arkime 6.1.1                                                   ║"
 echo "║             ├─Zeek (CERN EL9)                                                ║"
-echo "║             └─Suricata (planned)                                             ║"
+echo "║             └─Suricata                                          ║"
 echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 set -euo pipefail
 
@@ -288,14 +288,27 @@ curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
   }"
 
 echo
-echo "╔══════════════════════════════════════════════════════════════════════════════╗"
-echo "║ [INFO] Creating index template for Zeek logs                                 ║"
-echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+echo "[INFO] Creating index template for Zeek logs"
 curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
   -H "Content-Type: application/json" \
   -X PUT "https://localhost:9200/_index_template/leak-zeek-template" \
   -d "{
     \"index_patterns\": [\"zeek-*\"],
+    \"template\": {
+      \"settings\": {
+        \"index.lifecycle.name\": \"leak-logstash-retention\",
+        \"number_of_shards\": 1,
+        \"number_of_replicas\": 0
+      }
+    }
+  }"
+
+echo "[INFO] Creating index template for Suricata logs"
+curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" \
+  -H "Content-Type: application/json" \
+  -X PUT "https://localhost:9200/_index_template/leak-suricata-template" \
+  -d "{
+    \"index_patterns\": [\"suricata-*\"],
     \"template\": {
       \"settings\": {
         \"index.lifecycle.name\": \"leak-logstash-retention\",
@@ -363,6 +376,18 @@ echo "╔═══════════════════════�
 echo "║ [INFO] Kibana token obtained (length: ${#KIBANA_TOKEN} chars)                              ║"
 echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 
+# Generate self-signed cert for Kibana (separate from ES's cert,
+# because the kibana user can't read /etc/elasticsearch/certs).
+openssl req -x509 -nodes -days 1095 -newkey rsa:4096 \
+  -keyout /etc/kibana/kibana.key \
+  -out /etc/kibana/kibana.crt \
+  -subj "/CN=mitytest01.ad.mitylite.com" \
+  -addext "subjectAltName=DNS:mitytest01,DNS:mitytest01.ad.mitylite.com,DNS:localhost,IP:127.0.0.1"
+
+chown kibana:kibana /etc/kibana/kibana.key /etc/kibana/kibana.crt
+chmod 640 /etc/kibana/kibana.key
+chmod 644 /etc/kibana/kibana.crt
+
 cat > /etc/kibana/kibana.yml <<EOF
 server.host: "0.0.0.0"
 server.publicBaseUrl: "${KIBANA_PUBLIC}"
@@ -370,14 +395,19 @@ server.publicBaseUrl: "${KIBANA_PUBLIC}"
 elasticsearch.hosts: ["https://localhost:9200"]
 elasticsearch.serviceAccountToken: "${KIBANA_TOKEN}"
 elasticsearch.ssl.certificateAuthorities: ["/etc/kibana/http_ca.crt"]
+
+server.ssl.enabled: true
+server.ssl.certificate: /etc/kibana/kibana.crt
+server.ssl.key: /etc/kibana/kibana.key
 EOF
 
 chown root:kibana /etc/kibana/kibana.yml
 chmod 640 /etc/kibana/kibana.yml
 
-sudo cp /etc/elasticsearch/certs/http_ca.crt /etc/kibana/http_ca.crt
-sudo chown kibana:kibana /etc/kibana/http_ca.crt
-sudo chmod 644 /etc/kibana/http_ca.crt
+# Copies the elastic certificate so that Kibana uses it as a Certificate Authority
+cp /etc/elasticsearch/certs/http_ca.crt /etc/kibana/http_ca.crt
+chown kibana:kibana /etc/kibana/http_ca.crt
+chmod 644 /etc/kibana/http_ca.crt
 
 systemctl enable --now kibana
 
@@ -391,9 +421,24 @@ cp "$ES_HTTP_CA" /etc/logstash/certs/elastic-http-ca.crt
 chown -R root:logstash /etc/logstash/certs
 chmod 640 /etc/logstash/certs/elastic-http-ca.crt
 
-# Suppress the y/N keystore-password prompt by piping 'y'. The || true
-# keeps re-runs idempotent (the create command errors if the keystore exists).
-echo y | /usr/share/logstash/bin/logstash-keystore --path.settings /etc/logstash create || true
+# Password protect the keystore.
+if [[ ! -f /etc/logstash/logstash.keystore ]]; then
+  LOGSTASH_KEYSTORE_PASS=$(openssl rand -hex 32)
+  export LOGSTASH_KEYSTORE_PASS
+
+  /usr/share/logstash/bin/logstash-keystore --path.settings /etc/logstash create
+
+  # Persist the keystore password where the logstash service can find it.
+  # systemd reads /etc/sysconfig/logstash as an EnvironmentFile by default.
+  echo "LOGSTASH_KEYSTORE_PASS=${LOGSTASH_KEYSTORE_PASS}" | \
+    tee /etc/sysconfig/logstash >/dev/null
+  chmod 600 /etc/sysconfig/logstash
+fi
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║******************************************************************************║"
+echo "║**  Persisting Logstash keystore password to /etc/sysconfig/logstash        **║"
+echo "║******************************************************************************║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 # logstash-keystore add reads from stdin via --stdin and overwrites existing keys silently.
 printf "%s" "$ADMIN_PASS" | \
   /usr/share/logstash/bin/logstash-keystore --path.settings /etc/logstash add ES_PWD --stdin
@@ -416,7 +461,7 @@ input {
 }
 
 filter {
-  if [type] == "syslog" {
+  if [type] != "zeek" and [type] != "suricata" {
     grok {
       match => { "message" => "%{SYSLOGBASE} %{GREEDYDATA:msg}" }
     }
@@ -482,6 +527,45 @@ EOF
 
 chown root:logstash /etc/logstash/conf.d/zeek.conf
 chmod 640 /etc/logstash/conf.d/zeek.conf
+
+cat > /etc/logstash/conf.d/suricata.conf <<'EOF'
+input {
+  file {
+    path           => "/var/log/suricata/eve.json"
+    start_position => "beginning"
+    sincedb_path   => "/var/lib/logstash/sincedb_suricata"
+    codec          => "json"
+    type           => "suricata"
+    mode           => "tail"
+  }
+}
+
+filter {
+  if [type] == "suricata" {
+    # Suricata emits ISO8601 timestamps in 'timestamp' — promote to @timestamp
+    date {
+      match  => [ "timestamp", "ISO8601" ]
+      target => "@timestamp"
+    }
+  }
+}
+
+output {
+  if [type] == "suricata" {
+    elasticsearch {
+      hosts                       => ["https://localhost:9200"]
+      user                        => "elastic"
+      password                    => "${ES_PWD}"
+      ssl_enabled                 => true
+      ssl_certificate_authorities => ["/etc/logstash/certs/elastic-http-ca.crt"]
+      index                       => "suricata-%{+YYYY.MM.dd}"
+    }
+  }
+}
+EOF
+
+chown root:logstash /etc/logstash/conf.d/suricata.conf
+chmod 640 /etc/logstash/conf.d/suricata.conf
 
 systemctl enable --now logstash
 
@@ -560,6 +644,17 @@ RestartSec=10s
 WantedBy=multi-user.target
 EOF
 
+# Generate a self signed ssl certificate for use
+sudo openssl req -x509 -nodes -days 1095 -newkey rsa:4096 \
+  -keyout /opt/arkime/etc/arkime-viewer.key \
+  -out /opt/arkime/etc/arkime-viewer.crt \
+  -subj "/CN=mitytest01.ad.mitylite.com" \
+  -addext "subjectAltName=DNS:mitytest01,DNS:mitytest01.ad.mitylite.com,DNS:localhost,IP:127.0.0.1"
+
+sudo chown arkime:arkime /opt/arkime/etc/arkime-viewer.key /opt/arkime/etc/arkime-viewer.crt
+sudo chmod 640 /opt/arkime/etc/arkime-viewer.key
+sudo chmod 644 /opt/arkime/etc/arkime-viewer.crt
+
 sudo cp /etc/elasticsearch/certs/http_ca.crt /opt/arkime/etc/http_ca.crt
 sudo chown arkime:arkime /opt/arkime/etc/http_ca.crt
 sudo chmod 644 /opt/arkime/etc/http_ca.crt
@@ -598,7 +693,9 @@ awk '
   echo "passwordSecret=${ARKIME_SECRET}"
   echo "interface=${ARK_IFACE}"
   echo "pcapDir=${PCAP_PATH}"
-  echo "viewPort=8005"
+  echo "httpsPort=8005"
+  echo "keyFile=/opt/arkime/etc/arkime-viewer.key"
+  echo "certFile=/opt/arkime/etc/arkime-viewer.crt"
   echo "authMode=digest"
   echo "rotateIndex=daily"
   echo ""
@@ -790,26 +887,54 @@ sleep 5
   echo "[WARN] Zeek not yet healthy. Run: /opt/zeek/bin/zeekctl diag"
 
 echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+echo "║ [INFO] Installing Suricata                                                   ║"
+echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+
+# Suricata is in EPEL (already enabled earlier). Coexists with Zeek and
+# Arkime on the same interface — all three use AF_PACKET independently and
+# the kernel hands each its own copy of every frame. The NIC offload disable
+# we set up for Zeek/Arkime applies here too.
+dnf -y install suricata
+
+backup_if_exists /etc/sysconfig/suricata
+
+# Tell the systemd unit which interface to capture on. The EPEL unit reads
+# OPTIONS from /etc/sysconfig/suricata.
+cat > /etc/sysconfig/suricata <<EOF
+OPTIONS="-i ${ARK_IFACE} --user suricata"
+EOF
+
+# Pull the ET Open ruleset. Idempotent — re-runs just refresh rules.
+echo "[INFO] Fetching Suricata rules (suricata-update)"
+suricata-update --quiet || \
+  echo "[WARN] suricata-update failed. Rules may be empty until manually fetched."
+
+# Logstash needs to read /var/log/suricata/eve.json. Adding the logstash
+# user to the suricata group is cleaner than chmod-ing the log files.
+chmod 755 /var/log/suricata
+usermod -a -G suricata logstash
+
+# Pick up new group membership for logstash. Safe to restart; pipeline reloads.
+systemctl restart logstash
+
+systemctl daemon-reload
+systemctl enable --now suricata
+
+# Brief readiness check — non-fatal
+sleep 3
+if systemctl is-active --quiet suricata; then
+  echo "[INFO] Suricata is running on ${ARK_IFACE}"
+else
+  echo "[WARN] Suricata not yet healthy. Check: journalctl -u suricata -n 50"
+fi
+
+echo "╔══════════════════════════════════════════════════════════════════════════════╗"
 echo "║ [INFO] Configuring firewall                                                  ║"
 echo "╚══════════════════════════════════════════════════════════════════════════════╝"
-#firewall-cmd --permanent --remove-port=9200/tcp || true
-#firewall-cmd --permanent --remove-port=5601/tcp || true
-#firewall-cmd --permanent --remove-port=8005/tcp || true
-#firewall-cmd --permanent --remove-port=5044/tcp || true
-#firewall-cmd --permanent --remove-port=5140/tcp || true
-#firewall-cmd --permanent --remove-port=5140/udp || true
-
-#firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=tcp port=5601 accept"
-#firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=tcp port=8005 accept"
-#firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=tcp port=5044 accept"
-#firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=tcp port=5140 accept"
-#firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ALLOWED_CIDR} port protocol=udp port=5140 accept"
 
 echo "5601/tcp : $(firewall-cmd --permanent --add-port=5601/tcp)"
 echo "8005/tcp : $(firewall-cmd --permanent --add-port=8005/tcp)"
-echo "8005/tcp : $(firewall-cmd --permanent --add-port=8005/tcp)"
 echo "5140/tcp : $(firewall-cmd --permanent --add-port=5140/tcp)"
-echo "5140/udp : $(firewall-cmd --permanent --add-port=5140/udp)"
 echo "5140/udp : $(firewall-cmd --permanent --add-port=5140/udp)"
 
 firewall-cmd --reload
@@ -823,6 +948,7 @@ echo "logstash      : $(systemctl is-active logstash)"
 echo "arkimeviewer  : $(systemctl is-active arkimeviewer)"
 echo "arkimecapture : $(systemctl is-active arkimecapture)"
 echo "zeek          : $(systemctl is-active zeek)"
+echo "suricata      : $(systemctl is-active suricata)" 
 
 curl -sS --cacert "$ES_HTTP_CA" -u "elastic:$ADMIN_PASS" "https://localhost:9200/_cluster/health?pretty"
 
@@ -841,11 +967,11 @@ echo "Retention     : ${RETENTION_DAYS} days for logstash-* and zeek-* via ILM"
 echo "Backups       : ${BACKUP_DIR}"
 echo "TLS CA        : ${ES_HTTP_CA}"
 echo
-echo "Zeek troubleshooting:"
-echo "  /opt/zeek/bin/zeekctl status"
-echo "  /opt/zeek/bin/zeekctl diag"
-echo "  journalctl -u zeek -n 100"
-echo "  ls -la /opt/zeek/logs/current/"
-echo
+#echo "Zeek troubleshooting:"
+#echo "  /opt/zeek/bin/zeekctl status"
+#echo "  /opt/zeek/bin/zeekctl diag"
+#echo "  journalctl -u zeek -n 100"
+#echo "  ls -la /opt/zeek/logs/current/"
+#echo
 systemctl status elasticsearch kibana logstash arkimeviewer arkimecapture zeek --no-pager
 
